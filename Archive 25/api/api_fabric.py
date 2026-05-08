@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Header
 from typing import List, Optional, Dict
-from services.fabric.auth_service import FabricAuthService
+from services.fabric.auth_service import FabricAuthService, resolve_fabric_token
 from services.fabric.workspace_service import FabricWorkspaceService
 from services.fabric.pipeline_service import FabricPipelineService
 from services.fabric.deploy_service import FabricDeployService
@@ -9,9 +9,7 @@ import json
 router = APIRouter(prefix="/fabric", tags=["fabric"])
 
 def get_token(authorization: str):
-    if authorization and authorization.startswith("Bearer "):
-        return authorization.replace("Bearer ", "")
-    return None
+    return resolve_fabric_token(authorization)
 
 @router.get("/workspaces")
 async def list_workspaces(authorization: str = Header(...)):

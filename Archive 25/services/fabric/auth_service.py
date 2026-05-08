@@ -6,6 +6,46 @@ FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
 FABRIC_API_SCOPE = "https://api.fabric.microsoft.com/.default"
 ONELAKE_STORAGE_SCOPE = "https://storage.azure.com/.default"
 
+# Global cache for Fabric tokens to persist across steps
+# Keyed by a simple 'current' key for now, or could be keyed by client/user if needed
+_FABRIC_TOKEN_CACHE = {
+    "access_token": None,
+    "validation": None,
+    "timestamp": 0
+}
+
+def save_fabric_token(token: str, validation: dict = None):
+    global _FABRIC_TOKEN_CACHE
+    import time
+    _FABRIC_TOKEN_CACHE["access_token"] = token
+    _FABRIC_TOKEN_CACHE["validation"] = validation
+    _FABRIC_TOKEN_CACHE["timestamp"] = time.time()
+
+def get_cached_fabric_token():
+    global _FABRIC_TOKEN_CACHE
+    return _FABRIC_TOKEN_CACHE.get("access_token")
+
+def resolve_fabric_token(request_or_header: str = None) -> str:
+    """
+    Resolves a Fabric token from:
+    1. Provided header/string
+    2. Global cache
+    """
+    # 1. Check provided token
+    if request_or_header:
+        token = request_or_header.replace("Bearer ", "").strip()
+        if token and token != "null" and token != "undefined":
+            # Update cache if it's a new token
+            save_fabric_token(token)
+            return token
+            
+    # 2. Check cache
+    cached = get_cached_fabric_token()
+    if cached:
+        return cached
+        
+    return None
+
 class FabricAuthService:
     def __init__(self, tenant_id=None, client_id=None, client_secret=None):
         self.tenant_id = tenant_id or os.getenv("AZURE_TENANT_ID")

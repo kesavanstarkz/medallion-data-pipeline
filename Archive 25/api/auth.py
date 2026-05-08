@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from loguru import logger
 
 from core.settings import ENV_FILE, settings
+from services.fabric.auth_service import save_fabric_token, get_cached_fabric_token
 
 router = APIRouter(tags=["Auth"])
 
@@ -374,12 +375,19 @@ async def get_a_token(request: Request):
         "accessToken": access_token,
         "expiresOn": str(result.get("expires_on", "")),
         "tokenValidation": _token_validation(access_token, stored["target"]),
-        "adminInstructions": _fabric_admin_instructions(_token_validation(access_token, stored["target"])) if stored["target"] == "fabric" else "",
+    }
+
+    # PERSIST TOKEN TO CACHE (Fix for deployment flow)
+    if stored["target"] == "fabric":
+        save_fabric_token(access_token, payload["tokenValidation"])
+
+    payload.update({
+        "adminInstructions": _fabric_admin_instructions(payload["tokenValidation"]) if stored["target"] == "fabric" else "",
         "account": {
             "username": str(account.get("preferred_username") or account.get("email") or ""),
             "name": str(account.get("name") or ""),
         },
-    }
+    })
     if stored.get("auth_request_id"):
         _auth_results[stored["auth_request_id"]] = {
             "created_at": time.time(),
@@ -387,3 +395,10 @@ async def get_a_token(request: Request):
             **payload,
         }
     return _popup_message_html(stored["origin"], payload)
+
+@router.get("/auth/fabric/token")
+async def get_fabric_token():
+    token = get_cached_fabric_token()
+    if not token:
+        return {"accessToken": None}
+    return {"accessToken": token}

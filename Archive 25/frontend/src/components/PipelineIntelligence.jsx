@@ -220,8 +220,21 @@ export default function PipelineIntelligence({
       setData(initialData);
       if (initialData.__fabric_access_token) setFabricAccessToken(initialData.__fabric_access_token);
       if (initialData.__fabric_token_validation) setFabricTokenValidation(initialData.__fabric_token_validation);
+    } else {
+      // Try restoring from sessionStorage if no initialData
+      const storedToken = sessionStorage.getItem('fabric_access_token');
+      if (storedToken && !fabricAccessToken) {
+        setFabricAccessToken(storedToken);
+      }
     }
   }, [initialData]);
+
+  // Sync local state to prop changes (e.g. from Stepper restoration)
+  useEffect(() => {
+    if (fabricAccessToken && !sessionStorage.getItem('fabric_access_token')) {
+      sessionStorage.setItem('fabric_access_token', fabricAccessToken);
+    }
+  }, [fabricAccessToken]);
 
   useEffect(() => {
     selectedWorkspaceRef.current = selectedWorkspace;

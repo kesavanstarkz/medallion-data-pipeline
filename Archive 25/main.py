@@ -196,17 +196,22 @@ except Exception:
 @app.post("/deploy/execute", tags=["Fabric Deployment"])
 async def deploy_pipeline_execute(
     zip_file: Annotated[UploadFile, File(description="Fabric pipeline ZIP")],
-    access_token: Annotated[str, Form(description="Azure AD Token")],
     target_workspace_id: Annotated[str, Form(description="Target Fabric Workspace ID")],
+    access_token: Annotated[Optional[str], Form(description="Azure AD Token")] = None,
     pipeline_name: Annotated[Optional[str], Form()] = None
 ):
     # 1. Initialize Services
     from services.fabric.workspace_service import FabricWorkspaceService
     from services.fabric.pipeline_service import FabricPipelineService
     from services.fabric.deploy_service import FabricDeployService
+    from services.fabric.auth_service import resolve_fabric_token
     import httpx
     
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    resolved_token = resolve_fabric_token(access_token)
+    if not resolved_token:
+        raise HTTPException(status_code=401, detail="No Fabric Access Token found. Please re-analyze or scan.")
+
+    headers = {"Authorization": f"Bearer {resolved_token}", "Content-Type": "application/json"}
     FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
 
     # 2. Parse ZIP

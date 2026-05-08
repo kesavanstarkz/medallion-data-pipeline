@@ -199,6 +199,39 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setSelectedPipeline(pipeline || null);
   }
 
+  // Persist Fabric token to sessionStorage whenever it changes
+  useEffect(() => {
+    if (fabricAccessToken) {
+      console.log("STEPPER: Persisting Fabric token to sessionStorage");
+      sessionStorage.setItem('fabric_access_token', fabricAccessToken);
+    }
+  }, [fabricAccessToken]);
+
+  // Restore Fabric token on mount
+  useEffect(() => {
+    const restoreToken = async () => {
+      const storedToken = sessionStorage.getItem('fabric_access_token');
+      if (storedToken) {
+        console.log("STEPPER: Restored Fabric token from sessionStorage");
+        setFabricAccessToken(storedToken);
+      } else {
+        // Try fetching from backend session
+        try {
+          console.log("STEPPER: Attempting to fetch Fabric token from backend");
+          const res = await call('/auth/fabric/token');
+          if (res && res.accessToken) {
+            console.log("STEPPER: Fetched Fabric token from backend");
+            setFabricAccessToken(res.accessToken);
+            sessionStorage.setItem('fabric_access_token', res.accessToken);
+          }
+        } catch (e) {
+          console.warn("STEPPER: Failed to fetch token from backend", e);
+        }
+      }
+    };
+    restoreToken();
+  }, []);
+
   // ----- API FUNCTIONS -----
   useEffect(() => { fetchClients(); }, []);
 
