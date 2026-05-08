@@ -5,7 +5,7 @@ import { motion } from 'framer-motion';
 import logo from '../../assets/images/image.png';
 
 export default function StepConfig({
-  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig, intelligenceData, fabricMode = 'DISCOVERY', setConfigPersisted
+  selectedClient, folderPath, sourceType, call, toast, onNext, syncMasterConfig, intelligenceData, fabricMode = 'DISCOVERY', setConfigPersisted, setMasterConfig
 }) {
   const navigate = useNavigate();
   const [configData, setConfigData] = useState([]);
@@ -81,6 +81,7 @@ export default function StepConfig({
         });
       }
       setConfigData(loadedConfig);
+      if (loadedConfig.length > 0) setMasterConfig(loadedConfig[0]);
     } catch (e) {
       toast('Failed to load master configuration', 'error');
     } finally {

@@ -135,6 +135,8 @@ def run(
     batch_id:     Optional[str]  = None,
     stream:       bool           = True,
     require_real_scan: bool      = False,
+    platform:     Optional[str]  = None,
+    discovery_mode: Optional[str] = None,
     db:           Session        = Depends(get_db),
 ):
     """
@@ -160,7 +162,11 @@ def run(
         src = "ADLS"
     configured_types = _configured_source_types(client_name, db)
     requested_type = _canonical_source_type(src)
-    if configured_types and requested_type not in configured_types:
+    
+    # Fabric Runtime Bypass: Skip source type validation if driven by Fabric runtime discovery
+    is_fabric_runtime = (platform == "FABRIC") and (discovery_mode == "FABRIC_RUNTIME")
+    
+    if not is_fabric_runtime and configured_types and requested_type not in configured_types:
         logger.warning(f"Execution rejected for client={client_name}: requested={requested_type}, configured={sorted(configured_types)}")
         raise HTTPException(
             status_code=400,

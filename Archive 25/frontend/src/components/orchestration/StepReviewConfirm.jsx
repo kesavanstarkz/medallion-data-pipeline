@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { FiCheck, FiDatabase, FiFile, FiSettings, FiZap, FiCpu, FiActivity, FiArrowRight, FiCloud } from 'react-icons/fi';
 import { motion } from 'framer-motion';
 import logo from '../../assets/images/image.png';
@@ -57,6 +58,7 @@ export default function StepReviewConfirm({
   deploymentPackage = null,
   selectedWorkspace = null,
   selectedPipeline = null,
+  masterConfig = null,
 }) {
   const isFabricDeploy = fabricMode === 'DEPLOY';
   const isFabricReady = isFabricDeploy && !!configPersisted;
@@ -69,10 +71,17 @@ export default function StepReviewConfirm({
     endpoint: '/orchestrate/run',
     method: 'POST',
     query: {
-      source_type: isFabricDeploy ? 'FABRIC' : sourceType,
-      client_name: selectedClient || localStorage.getItem('client_name') || 'fabric_client',
-      folder_path: folderPath || (isFabricDeploy ? intelligenceData?.reformatted_config?.source_path : ''),
+      source_path: masterConfig?.source_folder || intelligenceData?.reformatted_config?.source_path || folderPath || '',
+      source_type: masterConfig?.source_type || (isFabricDeploy ? 'FABRIC' : sourceType),
+      pipeline_name: masterConfig?.source_object || selectedPipeline?.name || 'New_Fabric_Pipeline',
+      dataset_id: masterConfig?.dataset_id || '',
+      bronze_target: masterConfig?.target_layer_bronze || '',
+      silver_target: masterConfig?.target_layer_silver || '',
+      client_name: masterConfig?.client_name || selectedClient || localStorage.getItem('client_name') || 'fabric_client',
+      file_format: masterConfig?.file_format || '',
+      load_type: masterConfig?.load_type || 'Full',
       platform: selectedPlatform,
+      discovery_mode: intelligenceData?.discovery_mode || (isFabricDeploy ? 'FABRIC_RUNTIME' : null),
       deployment_strategy: deploymentStrategy,
       workspace_id: selectedWorkspace?.id,
       pipeline_id: selectedPipeline?.id,
@@ -85,10 +94,22 @@ export default function StepReviewConfirm({
           auth_mode: intelligenceData.auth_mode,
           scan_status: intelligenceData.scan_status,
           is_fallback: intelligenceData.is_fallback,
-          source_path: intelligenceData.ingestion_details?.source_path,
+          source_path: intelligenceData.ingestion_details?.source_path || masterConfig?.source_folder,
         }
       : null,
   };
+
+  // DEBUG LOGS
+  useEffect(() => {
+    console.log("Master config:", masterConfig);
+    console.log("Review payload:", executionPayload);
+    
+    const requiredFields = ['client_name', 'dataset_id', 'source_path', 'source_type', 'pipeline_name'];
+    const missingFields = requiredFields.filter(f => !executionPayload.query[f]);
+    if (missingFields.length > 0) {
+      console.warn("Missing required fields for execution:", missingFields);
+    }
+  }, [masterConfig, intelligenceData, folderPath, sourceType]);
 
   const realScanReady = !!intelligenceData
     && (isFabricDeploy || (!intelligenceData.is_fallback && intelligenceData.auth_mode !== 'none' && intelligenceData.pipeline_capabilities?.scan_mode !== 'mock'))
@@ -96,7 +117,17 @@ export default function StepReviewConfirm({
     && !!configPersisted;
 
   const isReady = requiresRealScan ? realScanReady : true;
-  const canExecute = isReady || isFabricReady;
+  
+  // VALIDATION LOGIC
+  const hasRequiredFields = 
+    executionPayload.query.client_name && 
+    executionPayload.query.dataset_id && 
+    executionPayload.query.source_path && 
+    executionPayload.query.source_type && 
+    executionPayload.query.pipeline_name;
+
+  const deploymentOk = !isFabricDeploy || pipelineDeployed;
+  const canExecute = (isReady || isFabricReady) && hasRequiredFields && deploymentOk;
 
   return (
     <motion.div
@@ -233,8 +264,8 @@ export default function StepReviewConfirm({
         <button className="orch-btn ghost" onClick={onBack}>Back</button>
         <button
           className="orch-btn primary step-next-btn"
-          onClick={onConfirm}
-          disabled={isOrchestrating || (!isFabricDeploy && (!selectedClient || !sourceType || !folderPath)) || !canExecute}
+          onClick={() => onConfirm(executionPayload)}
+          disabled={isOrchestrating || !canExecute}
           style={{ minWidth: 240, fontWeight: 800 }}
         >
           <FiCheck style={{ marginRight: 8 }} />

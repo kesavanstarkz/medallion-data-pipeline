@@ -88,6 +88,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [selectedWorkspace, setSelectedWorkspace] = useState(null);
   const [selectedPipeline, setSelectedPipeline] = useState(null);
   const [fabricAccessToken, setFabricAccessToken] = useState(null);
+  const [masterConfig, setMasterConfig] = useState(null);
   const selectedWorkspaceRef = useRef(null);
 
   // Source form state
@@ -432,47 +433,84 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   }
 
   // Orchestration
-  async function runOrchestration() {
-    if (!selectedClient) return toast('Select a client first', 'error');
+  async function runOrchestration(payloadFromReview) {
+    const query = payloadFromReview?.query || {};
+    
+    // 1. Normalize payload before validation
+    const normalizedPayload = {
+      source_path: query.source_path,
+      source_type: query.source_type,
+      pipeline_name: query.pipeline_name,
+      dataset_id: query.dataset_id,
+      bronze_target: query.bronze_target,
+      silver_target: query.silver_target,
+      client_name: query.client_name,
+      file_format: query.file_format,
+      load_type: query.load_type,
+      platform: query.platform,
+      discovery_mode: query.discovery_mode,
+      deployment_strategy: query.deployment_strategy,
+      workspace_id: query.workspace_id,
+      pipeline_id: query.pipeline_id,
+      package_name: query.package_name
+    };
+
+    console.log("DEA normalized payload:", normalizedPayload);
+    
+    if (!selectedClient && !normalizedPayload.client_name) return toast('Select a client first', 'error');
+    
     const runningIntelligenceSuggestion = selectedApiSource === 'intelligence-scan';
     const publicRestApiScan = intelligenceData?.framework === 'REST API';
+    
     if (runningIntelligenceSuggestion && (!intelligenceData || intelligenceData.is_fallback || intelligenceData.scan_status === 'failed' || (!publicRestApiScan && intelligenceData.auth_mode === 'none') || intelligenceData.pipeline_capabilities?.scan_mode === 'mock')) {
-      console.debug('Execution validation failed', {
-        hasIntelligence: !!intelligenceData,
-        is_fallback: intelligenceData?.is_fallback,
-        scan_status: intelligenceData?.scan_status,
-        auth_mode: intelligenceData?.auth_mode,
-        scan_mode: intelligenceData?.pipeline_capabilities?.scan_mode,
-      });
       return toast('Please perform a real scan using credentials before execution.', 'error');
     }
+    
     if (runningIntelligenceSuggestion && !configPersisted) {
-      console.debug('Execution validation failed: config not persisted');
       return toast('Save generated configuration before execution.', 'error');
     }
-    if (!sourceType) return toast('Specify source_type', 'error');
-    if (!folderPath && !['LOCAL', 'S3'].includes(String(sourceType).toUpperCase())) {
-      return toast('Specify folder_path', 'error');
+
+    // 2. Validate normalizedPayload only
+    if (!normalizedPayload.source_type) {
+       toast('Specify source_type', 'error');
+       return;
     }
-    console.debug('Execution trigger validation passed', {
-      client_name: selectedClient,
-      source_type: sourceType,
-      folder_path: folderPath,
-      selected_source: selectedApiSource,
-      sources: selectedSources,
-    });
+    if (!normalizedPayload.source_path) {
+       toast('Specify source_path', 'error');
+       return;
+    }
+    if (normalizedPayload.platform === 'FABRIC') {
+        if (!normalizedPayload.workspace_id) {
+           toast('Specify workspace_id', 'error');
+           return;
+        }
+        if (!normalizedPayload.pipeline_id) {
+           toast('Specify pipeline_id', 'error');
+           return;
+        }
+    }
+    if (!normalizedPayload.client_name) {
+       toast('Specify client_name', 'error');
+       return;
+    }
+
+    console.debug('Execution trigger validation passed', normalizedPayload);
 
     setStep(7);
     setOrchestrateResp({ progress: [] });
     setIsOrchestrating(true);
     try {
       toast('Running orchestration — streaming progress...', 'info');
-      const params = new URLSearchParams({
-        source_type: sourceType,
-        client_name: selectedClient,
-        require_real_scan: runningIntelligenceSuggestion ? 'true' : 'false',
+      
+      const params = new URLSearchParams();
+      // 3. DEA API request must use normalizedPayload
+      Object.entries(normalizedPayload).forEach(([k, v]) => {
+        if (v !== null && v !== undefined && v !== '') params.set(k, String(v));
       });
-      if (folderPath) params.set('folder_path', folderPath);
+      
+      // Keep flags
+      params.set('require_real_scan', runningIntelligenceSuggestion ? 'true' : 'false');
+
       const qs = `?${params.toString()}`;
       const response = await fetch(apiUrl(`/orchestrate/run${qs}`), {
         method: 'POST',
@@ -1097,6 +1135,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     fabricMode={sourceForm.fabricMode}
                     setConfigPersisted={setConfigPersisted}
                     selectedPlatform={selectedPlatform}
+                    setMasterConfig={setMasterConfig}
                   />
                 </div>
               )}
@@ -1155,6 +1194,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   folderPath={folderPath}
                   intelligenceData={intelligenceData}
                   configPersisted={configPersisted}
+                  masterConfig={masterConfig}
                   requiresRealScan={selectedApiSource === 'intelligence-scan'}
                   onBack={() => setStep(5)}
                   onConfirm={runOrchestration}
