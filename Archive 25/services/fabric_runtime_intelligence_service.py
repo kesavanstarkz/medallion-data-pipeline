@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -11,6 +12,7 @@ from fastapi import HTTPException
 from core.database import SessionLocal
 from models.metadata import PipelineRunHistory
 from services.fabric.pipeline_service import FabricPipelineService
+from services.fabric.artifact_resolver import FabricArtifactResolver
 from services.fabric_bundle_analysis_service import _extract_auto_discovered_config, merge_pipeline_configs
 
 logger = logging.getLogger(__name__)
@@ -1012,25 +1014,65 @@ async def execute_and_capture_runtime_intelligence(
 
     job_instance = {}
     activity_runs: List[Dict[str, Any]] = []
+    
+    # PHASE 1: Wait for Pipeline Completion
     deadline = datetime.utcnow() + timedelta(seconds=timeout_seconds)
+    pipeline_completed = False
+    
     while datetime.utcnow() < deadline:
         try:
             job_instance = await pipeline_service.get_pipeline_job_instance(workspace_id, pipeline_id, job_instance_id)
+            status = str(job_instance.get("status") or "")
+            if status in TERMINAL_STATUSES:
+                logger.info(f"Pipeline {job_instance_id} reached terminal status: {status}")
+                pipeline_completed = True
+                break
         except HTTPException as exc:
             if exc.status_code == 403:
                 raise _fabric_permission_error(token_validation)
             raise
+        await asyncio.sleep(poll_interval_seconds)
+
+    # PHASE 2: Wait for Activity Metadata (Eventual Consistency)
+    # Fabric completion does not guarantee immediate activity metadata availability.
+    root_activity_id = job_instance.get("rootActivityId")
+    logger.info(f"Starting activity polling for job {job_instance_id}. rootActivityId: {root_activity_id}")
+    
+    max_activity_retries = 20
+    activity_attempt = 0
+    backoff_intervals = [3, 3, 5, 5, 8, 8, 10, 10] # Custom backoff sequence
+    
+    while activity_attempt < max_activity_retries:
         query_after = (run_start_requested_at - timedelta(minutes=5)).isoformat() + "Z"
         query_before = _iso_now()
+        
         try:
             activity_runs = await pipeline_service.query_activity_runs(workspace_id, job_instance_id, query_after, query_before)
-        except HTTPException as exc:
-            if exc.status_code == 403:
-                raise _fabric_permission_error(token_validation)
-            raise
-        if str(job_instance.get("status") or "") in TERMINAL_STATUSES:
+            
+            logger.info(
+                f"Activity polling attempt {activity_attempt + 1}/{max_activity_retries}: "
+                f"Found {len(activity_runs)} activities for job {job_instance_id}. "
+                f"Status: {job_instance.get('status')}"
+            )
+            
+            if activity_runs:
+                # We found activities, stop polling
+                break
+                
+        except Exception as e:
+            logger.error(f"Error querying activity runs during polling: {e}")
+            
+        activity_attempt += 1
+        if activity_attempt >= max_activity_retries:
             break
-        await __import__("asyncio").sleep(poll_interval_seconds)
+            
+        # Determine wait time
+        wait_time = backoff_intervals[min(activity_attempt, len(backoff_intervals)-1)]
+        await asyncio.sleep(wait_time)
+
+    if not activity_runs and pipeline_completed and job_instance.get("status") == "Completed":
+        logger.warning(f"Fabric returned Completed status for {job_instance_id} but no activity metadata became available after {max_activity_retries} retries.")
+        # We continue anyway to return the job instance state, but discovery will be empty.
 
     static_config = _extract_auto_discovered_config(existing_analysis or {}) if existing_analysis else {}
     final_pipeline_config = merge_pipeline_configs(static_config, static_config) if static_config else {}
@@ -1079,6 +1121,36 @@ async def execute_and_capture_runtime_intelligence(
         ],
         runtime_metrics=runtime_metrics,
     )
+    
+    # Resolve missing artifact IDs dynamically from Fabric workspace items
+    artifact_resolver = FabricArtifactResolver(access_token)
+    resolution_diagnostics = []
+    
+    source_conn = runtime_source_discovery.get("source_connection")
+    if source_conn and not source_conn.get("artifact_id"):
+        resolved_id = await artifact_resolver.resolve_artifact_id(
+            workspace_id, 
+            source_conn, 
+            diagnostics=resolution_diagnostics
+        )
+        if resolved_id:
+            source_conn["artifact_id"] = resolved_id
+            if "connection_metadata" in source_conn:
+                source_conn["connection_metadata"]["artifactId"] = resolved_id
+
+    target_conn = runtime_source_discovery.get("target_connection")
+    if target_conn and not target_conn.get("artifact_id"):
+        resolved_id = await artifact_resolver.resolve_artifact_id(
+            workspace_id, 
+            target_conn, 
+            diagnostics=resolution_diagnostics
+        )
+        if resolved_id:
+            target_conn["artifact_id"] = resolved_id
+            if "connection_metadata" in target_conn:
+                target_conn["connection_metadata"]["artifactId"] = resolved_id
+    
+    runtime_source_discovery["resolution_diagnostics"] = resolution_diagnostics
 
     payload = {
         "pipeline_run_id": job_instance_id,
@@ -1139,4 +1211,12 @@ async def execute_and_capture_runtime_intelligence(
         end_time=job_instance.get("endTimeUtc"),
         payload=payload,
     )
+
+    if not activity_runs and pipeline_completed and job_instance.get("status") == "Completed":
+        # Fail loudly after persistence to notify the user of the eventual consistency issue.
+        raise HTTPException(
+            status_code=408, 
+            detail="Fabric returned completed pipeline status but no activity metadata became available after exhaustive polling. This is likely an eventual consistency delay in the Fabric Items API. Please wait a moment and try the scan again."
+        )
+
     return payload

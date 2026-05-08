@@ -284,7 +284,8 @@ export default function PipelineIntelligence({
     const artifactWorkspaceId = resolveConnectionWorkspaceId(connection);
 
     if (!connection.artifact_id) {
-      throw new Error('Runtime source is missing an artifact ID.');
+      console.warn('Runtime source is missing an artifact ID. Some actions may be limited.');
+      // We no longer throw here to prevent UI "crashes", but we will disable relevant buttons in the UI.
     }
 
     return {
@@ -900,23 +901,45 @@ export default function PipelineIntelligence({
                     ))}
                   </div>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
-                    <button className="pi-btn-confirm" onClick={handlePreviewRuntimeSource} disabled={runtimePreviewLoading}>
+                    <button className="pi-btn-confirm" onClick={handlePreviewRuntimeSource} disabled={runtimePreviewLoading || !runtimeSourceConnection.artifact_id}>
                       <FiEye /> {runtimePreviewLoading ? 'Loading Preview...' : 'Preview Data'}
                     </button>
-                    <button className="pi-btn-confirm" onClick={handleUseRuntimeSource}>
+                    <button className="pi-btn-confirm" onClick={handleUseRuntimeSource} disabled={!runtimeSourceConnection.artifact_id}>
                       <FiCheck /> Use Source
                     </button>
-                    <button className="pi-btn-confirm" onClick={handleSaveRuntimeSource} disabled={runtimeSaveLoading}>
+                    <button className="pi-btn-confirm" onClick={handleSaveRuntimeSource} disabled={runtimeSaveLoading || !runtimeSourceConnection.artifact_id}>
                       <FiSave /> {runtimeSaveLoading ? 'Saving...' : 'Save Source'}
                     </button>
                     <button className="pi-btn-confirm" onClick={handleGenerateIngestionConfig}>
                       <FiCopy /> Generate Ingestion Config
                     </button>
-                    <button className="pi-btn-confirm" onClick={handleBuildPipelineFromSource}>
+                    <button className="pi-btn-confirm" onClick={handleBuildPipelineFromSource} disabled={!runtimeSourceConnection.artifact_id}>
                       <FiGitBranch /> Build Pipeline From Source
                     </button>
                   </div>
+                  {!runtimeSourceConnection.artifact_id && (
+                    <div className="pi-alert warning" style={{ marginTop: 12, fontSize: 12 }}>
+                      <FiAlertCircle /> <strong>Artifact resolution failed:</strong> The runtime source is missing a Fabric artifact ID. 
+                      Try identifying the Lakehouse name in the pipeline configuration or ensure the source is accessible.
+                    </div>
+                  )}
                 </div>
+                {runtimeDiscovery.resolution_diagnostics && runtimeDiscovery.resolution_diagnostics.length > 0 && (
+                  <div className="pi-card">
+                    <div className="pi-card-title">Artifact Resolution Diagnostics</div>
+                    <div className="pi-list">
+                      {renderListItems(runtimeDiscovery.resolution_diagnostics, (item) => (
+                        <div style={{ fontSize: 11, marginBottom: 4 }}>
+                          <span style={{ fontWeight: 700, color: item.status === 'success' ? '#10b981' : '#f59e0b' }}>
+                            [{item.strategy.replace(/_/g, ' ').toUpperCase()}]
+                          </span> {item.status.toUpperCase()}
+                          {item.artifact_id && <span> • ID: <code style={{ background: '#f1f5f9', padding: '2px 4px', borderRadius: 4 }}>{item.artifact_id}</code></span>}
+                          {item.item_name && <span> • Match: <strong>{item.item_name}</strong></span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="pi-card">
                   <div className="pi-card-title">Target Connection Card</div>
                   <div className="pi-kv-grid">
