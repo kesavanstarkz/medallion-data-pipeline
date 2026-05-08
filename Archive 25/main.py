@@ -267,15 +267,30 @@ async def deploy_pipeline_execute(
         }
         
         create_resp = await client.post(f"{FABRIC_API_BASE}/workspaces/{target_workspace_id}/items", headers=headers, json=payload)
+        
+        # LOGGING (Requirement 9)
+        logging.info(f"BACKEND ENDPOINT HIT: /deploy/execute")
+        logging.info(f"DEPLOYMENT MODE: CREATE_OR_VERSION")
+        logging.info(f"WORKSPACE ID: {target_workspace_id}")
+        logging.info(f"TARGET WORKSPACE: {target_workspace_id}") # Usually the same in this simple flow
+        logging.info(f"REQUESTED PIPELINE NAME: {final_name}")
+        logging.info(f"ACTUAL FABRIC API CALLED: POST {FABRIC_API_BASE}/workspaces/{target_workspace_id}/items")
+        
         if not create_resp.is_success:
+            logging.error(f"FABRIC API ERROR RESPONSE: {create_resp.text}")
             raise HTTPException(status_code=create_resp.status_code, detail=f"Fabric API Error: {create_resp.text}")
             
+        resp_json = create_resp.json()
+        logging.info(f"RESPONSE PAYLOAD: {json.dumps(resp_json)}")
+        logging.info(f"CREATED PIPELINE ITEM ID: {resp_json.get('id')}")
+
         return {
             "workspace_id": target_workspace_id,
             "pipeline_deployed": final_name,
             "status": "SUCCESS",
+            "id": resp_json.get("id"),
             "remapped_ids": len(id_mappings),
-            "fabric_response": create_resp.json(),
+            "fabric_response": resp_json,
             "pipeline_json": final_definition,
             "manifest_json": parsed.get("manifest", {})
         }

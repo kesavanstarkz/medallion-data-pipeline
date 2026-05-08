@@ -62,3 +62,24 @@ async def extract(workspace_id: str, pipeline_id: str, authorization: str = Head
             "manifest": json.loads(files.get("manifest.json", b"{}").decode('utf-8'))
         }
     raise HTTPException(status_code=404, detail="Pipeline not found")
+    
+@router.post("/clone")
+async def clone(
+    source_workspace_id: str = Form(...),
+    source_pipeline_id: str = Form(...),
+    target_workspace_id: str = Form(...),
+    new_name: str = Form(...),
+    authorization: str = Header(...)
+):
+    token = get_token(authorization)
+    if not token: raise HTTPException(status_code=401, detail="Invalid Token")
+    
+    print(f"DEBUG: clone pipe={source_pipeline_id} to ws={target_workspace_id} as {new_name}")
+    deploy_service = FabricDeployService(token)
+    
+    return await deploy_service.clone_pipeline(
+        source_workspace_id=source_workspace_id,
+        source_pipeline_id=source_pipeline_id,
+        target_workspace_id=target_workspace_id,
+        new_name=new_name
+    )

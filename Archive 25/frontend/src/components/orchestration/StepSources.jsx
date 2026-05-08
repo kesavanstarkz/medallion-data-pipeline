@@ -208,6 +208,28 @@ export default function StepSources({
       intelligenceData?.framework !== "Microsoft Fabric"
     )
       return null;
+
+    const runtimeConfig = intelligenceData?.reformatted_config;
+    const isRuntime = runtimeConfig?.discovery_mode === "FABRIC_RUNTIME";
+
+    if (isRuntime) {
+      return {
+        tab: null,
+        type: "FABRIC",
+        title: runtimeConfig.pipeline_name,
+        path: runtimeConfig.source_path,
+        meta: [
+          `Workspace: ${runtimeConfig.source?.workspace_id || runtimeConfig.targets?.workspace_id || "Fabric Workspace"}`,
+          `Pipeline: ${runtimeConfig.pipeline_name}`,
+          ...(runtimeConfig.linked_services || []).map((ls) => `Linked Service: ${ls}`),
+          ...(runtimeConfig.file_types || []).map((ft) => `Format: ${ft}`),
+          runtimeConfig.targets?.lakehouse ? "Target: Lakehouse" : null,
+          runtimeConfig.targets?.warehouse ? "Target: Warehouse" : null,
+          `Connector: ${runtimeConfig.source_type || "DelimitedTextSource"}`
+        ].filter(Boolean),
+      };
+    }
+
     const rawScan = intelligenceData?.raw_cloud_scan || {};
     const workspace = rawScan.fabric_workspaces?.[0];
     const pipeline =
@@ -231,6 +253,7 @@ export default function StepSources({
       pipeline?.displayName ||
       intelligenceData?.reformatted_config?.pipeline_name ||
       "Fabric pipeline";
+
     return {
       tab: null,
       type: "FABRIC",

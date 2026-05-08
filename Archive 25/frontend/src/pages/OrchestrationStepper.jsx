@@ -87,6 +87,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [deploymentPackage, setDeploymentPackage] = useState(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState(null);
   const [selectedPipeline, setSelectedPipeline] = useState(null);
+  const [fabricAccessToken, setFabricAccessToken] = useState(null);
   const selectedWorkspaceRef = useRef(null);
 
   // Source form state
@@ -990,12 +991,15 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   setSelectedPipeline={handlePipelineSelection}
                   onScanComplete={(data) => {
                     console.log("STEPPER: Intelligence scan completed", data);
-                    // Discovered assets will be managed inside PipelineIntelligence
+                    if (data?.__fabric_access_token) {
+                      setFabricAccessToken(data.__fabric_access_token);
+                    }
                   }}
                   onConfirm={(data) => {
                     if (data) {
                       setIntelligenceData(data);
                       if (data.deploymentStrategy) setDeploymentStrategy(data.deploymentStrategy);
+                      if (data.__fabric_access_token) setFabricAccessToken(data.__fabric_access_token);
                     }
                     // Configure EVERYTHING before deployment
                     setStep(3);
@@ -1070,6 +1074,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   deploymentStrategy={deploymentStrategy}
                   deploymentPackage={deploymentPackage}
                   setDeploymentPackage={setDeploymentPackage}
+                  fabricAccessToken={fabricAccessToken}
                   onNext={() => setStep(5)}
                 />
               )}

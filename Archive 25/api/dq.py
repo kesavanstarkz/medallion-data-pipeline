@@ -454,13 +454,43 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
         from core.utils import generate_dataset_id
         
         sources = db.query(APISourceConfig).filter(APISourceConfig.client_name == request.client_name).all()
-        if not sources:
+        
+        # Check for Fabric Runtime rows in DB as a backup discovery source
+        from models.master_config import MasterConfigAuthoritative
+        fabric_runtime_rows = db.query(MasterConfigAuthoritative).filter(
+            MasterConfigAuthoritative.client_name == request.client_name,
+            MasterConfigAuthoritative.source_type.in_(["FABRIC", "FABRIC_RUNTIME"])
+        ).all()
+
+        if not sources and not fabric_runtime_rows:
             return {
                 "status": "no_source_found",
-                "message": f"No Master Config or registered Source Config found for {request.client_name}. Register a source first.",
+                "message": f"No Master Config, Fabric Runtime, or registered Source Config found for {request.client_name}. Register a source first.",
                 "synced": 0,
                 "created": 0
             }
+        
+        all_discovered = []
+        
+        # Add Fabric Runtime rows first
+        for fr in fabric_runtime_rows:
+            all_discovered.append({
+                "dataset_id": fr.dataset_id,
+                "pipeline_id": fr.pipeline_id,
+                "client_name": fr.client_name,
+                "source_type": fr.source_type,
+                "source_folder": fr.source_folder,
+                "source_object": fr.source_object,
+                "file_format": fr.file_format,
+                "raw_layer_path": fr.raw_layer_path,
+                "target_layer_bronze": fr.target_layer_bronze,
+                "target_layer_silver": fr.target_layer_silver,
+                "is_active": fr.is_active,
+                "load_type": fr.load_type or "full",
+                "upsert_key": fr.upsert_key or "",
+                "watermark_column": fr.watermark_column or "",
+                "partition_column": fr.partition_column or ""
+            })
         
         all_discovered = []
         for s in sources:

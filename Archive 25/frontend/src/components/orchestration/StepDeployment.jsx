@@ -5,6 +5,7 @@ import {
   FiEdit2, FiZap, FiPlus, FiArrowRight, FiActivity, FiSearch
 } from 'react-icons/fi';
 import { motion, AnimatePresence } from 'framer-motion';
+import { apiUrl } from '../../hooks/useApi';
 
 export default function StepDeployment({ 
   selectedWorkspace, 
@@ -12,6 +13,7 @@ export default function StepDeployment({
   deploymentStrategy, 
   deploymentPackage, 
   setDeploymentPackage, 
+  fabricAccessToken,
   onNext 
 }) {
   const [isDragging, setIsDragging] = useState(false);
@@ -47,6 +49,7 @@ export default function StepDeployment({
     setTimeout(() => {
       setDeploymentPackage({
         name: file.name,
+        file: file, // Store the actual file object
         size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
         uploadedAt: new Date().toISOString(),
         manifest: {
@@ -60,39 +63,86 @@ export default function StepDeployment({
   };
 
   const executeDeployment = async () => {
+    console.log("DEPLOY CLICKED");
+    const payload = {
+      workspaceId: selectedWorkspace?.id,
+      targetWorkspace: selectedWorkspace?.name || selectedWorkspace?.displayName,
+      deploymentMode: deploymentStrategy,
+      requestedPipelineName: deploymentStrategy === 'CLONE' ? newPipelineName : (deploymentPackage?.name || selectedPipeline?.name),
+      sourcePipelineId: selectedPipeline?.id
+    };
+    console.log("DEPLOY PAYLOAD", payload);
+    
     setStatus('deploying');
     setDeployLogs([]);
     addLog(`Initiating ${deploymentStrategy} flow...`);
 
     try {
       // Step 1: Validation
-      await new Promise(r => setTimeout(r, 800));
       addLog("Validating Fabric workspace permissions...");
+      if (!fabricAccessToken) {
+        throw new Error("No Fabric Access Token found. Please re-analyze the pipeline or scan to refresh session.");
+      }
       
-      // Step 2: Strategy specific logic
+      // Step 2: Deployment via Backend
+      let response;
       if (deploymentStrategy === 'CREATE_NEW') {
-        addLog("Extracting pipeline definition from ZIP...");
-        await new Promise(r => setTimeout(r, 1000));
-        addLog(`Creating new pipeline item: ${deploymentPackage?.name.replace('.zip', '')}`);
+        if (!deploymentPackage?.file) {
+           throw new Error("Deployment package file is missing. Please re-upload.");
+        }
+        const formData = new FormData();
+        formData.append('access_token', fabricAccessToken);
+        formData.append('target_workspace_id', selectedWorkspace?.id);
+        formData.append('zip_file', deploymentPackage.file);
+        formData.append('pipeline_name', deploymentPackage.name.replace('.zip', ''));
+        
+        addLog(`Uploading package '${deploymentPackage.name}' to backend...`);
+        response = await fetch(apiUrl('/deploy/execute'), {
+          method: 'POST',
+          body: formData
+        });
       } else if (deploymentStrategy === 'CLONE') {
-        addLog(`Duplicating definition of ${selectedPipeline?.name}...`);
-        await new Promise(r => setTimeout(r, 1000));
-        addLog(`Generating new GUIDs and mapping to: ${newPipelineName}`);
-      } else if (deploymentStrategy === 'MODIFY') {
-        addLog("Patching pipeline activities with new configuration...");
-        await new Promise(r => setTimeout(r, 1000));
-        addLog("Updating existing pipeline manifest...");
+        addLog(`Executing clone for ${selectedPipeline?.name}...`);
+        const formData = new FormData();
+        formData.append('source_workspace_id', selectedWorkspace?.id);
+        formData.append('source_pipeline_id', selectedPipeline?.id);
+        formData.append('target_workspace_id', selectedWorkspace?.id);
+        formData.append('new_name', newPipelineName);
+        
+        response = await fetch(apiUrl('/fabric/clone'), {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${fabricAccessToken}` },
+          body: formData
+        });
+      } else {
+        throw new Error(`Strategy ${deploymentStrategy} is not yet implemented with a real backend call.`);
       }
 
-      // Step 3: Deployment
-      addLog("Uploading manifest to Microsoft Fabric API...");
-      await new Promise(r => setTimeout(r, 1200));
-      addLog("Deployment finalized. Waiting for Fabric sync...");
-      await new Promise(r => setTimeout(r, 800));
+      const result = await response.json();
+      console.log("DEPLOY RESPONSE", result);
 
+      if (!response.ok) {
+        throw new Error(result.detail || "Deployment failed");
+      }
+
+      const deployedName = result.pipeline_deployed || result.displayName;
+      const deployedId = result.id || (result.fabric_response?.id);
+
+      addLog(`Fabric Deployment Successful: ${deployedName}`);
+      addLog(`Item ID: ${deployedId}`);
+      
       setStatus('success');
+      // Store the result ID for the next steps
+      if (setDeploymentPackage) {
+        setDeploymentPackage({
+          ...deploymentPackage,
+          deployedId: deployedId,
+          deployedName: deployedName
+        });
+      }
     } catch (e) {
-      setError("Deployment failed: Could not connect to Fabric API.");
+      console.error("DEPLOY ERROR", e);
+      setError(e.message || "Deployment failed: Could not connect to Fabric API.");
       setStatus('error');
     }
   };
@@ -115,19 +165,21 @@ export default function StepDeployment({
           <div className="deployment-context-grid">
             <div className="context-item">
               <span className="context-label">Workspace</span>
-              <span className="context-value">{selectedWorkspace?.name || selectedWorkspace?.displayName || 'Smax_MVP'}</span>
+              <span className="context-value">{selectedWorkspace?.name || selectedWorkspace?.displayName || 'Fabric Workspace'}</span>
             </div>
             <div className="context-item">
               <span className="context-label">Pipeline</span>
-              <span className="context-value">{deploymentStrategy === 'CLONE' ? newPipelineName : (selectedPipeline?.name || 'API Ingestion_v2')}</span>
+              <span className="context-value" style={{ color: '#2563eb', fontWeight: 800 }}>{deploymentPackage?.deployedName || newPipelineName}</span>
             </div>
             <div className="context-item">
-              <span className="context-label">Deployment Type</span>
-              <span className="context-value pi-tag active">{deploymentStrategy?.replace(/_/g, ' ')}</span>
+              <span className="context-label">Strategy</span>
+              <span className="context-value pi-tag active" style={{ background: '#eff6ff', color: '#2563eb', border: '1px solid #dbeafe', padding: '2px 8px', borderRadius: 6, fontSize: 11, width: 'fit-content' }}>
+                {deploymentStrategy?.replace(/_/g, ' ')}
+              </span>
             </div>
             <div className="context-item">
-              <span className="context-label">Status</span>
-              <span className="context-value" style={{ color: '#16a34a', fontWeight: 800 }}>LIVE</span>
+              <span className="context-label">Item ID</span>
+              <span className="context-value" style={{ fontFamily: 'monospace', fontSize: 11, color: '#64748b' }}>{deploymentPackage?.deployedId || 'Pending'}</span>
             </div>
           </div>
         </div>

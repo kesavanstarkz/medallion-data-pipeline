@@ -327,6 +327,123 @@ def _fabric_activity_flow(resources: List[Dict[str, Any]]) -> List[str]:
 
 
 def _fabric_rule_extract(client_name: str, original_config: Dict[str, Any], raw_cloud_scan: Any, delimiter_config: Dict[str, Any]) -> Dict[str, Any]:
+    # Check if this is a runtime intelligence payload
+    is_runtime = isinstance(original_config, dict) and "runtime_metrics" in original_config and "runtime_activity_tracker" in original_config
+    
+    if is_runtime:
+        logger.info("Generated config populated from runtime intelligence")
+        runtime_metrics = original_config.get("runtime_metrics") or {}
+        runtime_tracker = original_config.get("runtime_activity_tracker") or []
+        runtime_source = original_config.get("runtime_source_discovery") or {}
+        source_conn = runtime_source.get("source_connection") or {}
+        target_conn = runtime_source.get("target_connection") or {}
+        exec_summary = original_config.get("runtime_execution_summary") or {}
+
+        activity_count = runtime_metrics.get("total_activities") or len(runtime_tracker)
+        activity_names = [a.get("activity_name") for a in runtime_tracker if a.get("activity_name")]
+        copy_activities = [a.get("activity_name") for a in runtime_tracker if str(a.get("activity_type") or "").lower() == "copy"]
+        notebooks = [a.get("activity_name") for a in runtime_tracker if "notebook" in str(a.get("activity_type") or "").lower()]
+        
+        # linked_services -> dataset linkedService names
+        linked_services = []
+        if source_conn.get("linked_service_name"):
+            linked_services.append(source_conn["linked_service_name"])
+        for a in runtime_tracker:
+            ls = a.get("linked_service_name")
+            if ls and ls not in linked_services:
+                linked_services.append(ls)
+        
+        # file_types -> infer from source filename extension
+        file_types = []
+        source_file = source_conn.get("file_name") or ""
+        if "." in source_file:
+            ext = source_file.split(".")[-1].upper()
+            if ext in ["CSV", "JSON", "PARQUET", "TSV", "TXT"]:
+                file_types.append(ext)
+        if not file_types and source_conn.get("format"):
+            file_types.append(str(source_conn["format"]).upper())
+        if not file_types:
+            file_types = ["CSV"] # Safe default if nothing else found
+            
+        # targets.lakehouse -> true if target storage_type == "Lakehouse"
+        has_lakehouse = str(target_conn.get("storage_type") or "").lower() == "lakehouse"
+        has_warehouse = str(target_conn.get("storage_type") or "").lower() == "warehouse"
+        
+        # source_path -> resolved source path
+        pipeline_name = exec_summary.get("pipeline_name", "Fabric Runtime Pipeline")
+        source_path = source_conn.get("resolved_path") or source_conn.get("full_path") or f"fabric://{pipeline_name}"
+        
+        # delimiter_config update
+        if source_conn.get("delimiter"):
+            delimiter_config["column_delimiter"] = source_conn["delimiter"]
+        if source_conn.get("header_enabled") is not None:
+            delimiter_config["header"] = source_conn["header_enabled"]
+
+        reformatted_config = {
+            "client_name": client_name,
+            "source_type": "FABRIC_RUNTIME",
+            "source_path": source_path,
+            "pipeline_name": pipeline_name,
+            "activity_count": activity_count,
+            "activities": activity_names,
+            "copy_activities": copy_activities,
+            "notebooks": notebooks,
+            "linked_services": sorted(list(set(linked_services))),
+            "file_types": sorted(list(set(file_types))),
+            "delimiter_config": delimiter_config,
+            "targets": {
+                "lakehouse": has_lakehouse,
+                "warehouse": has_warehouse,
+            },
+        }
+
+        return {
+            "source_systems": [], # Runtime discovery usually has its own source panel
+            "ingestion_support": {
+                "file_based": True,
+                "api": any("web" in str(a.get("activity_type") or "").lower() for a in runtime_tracker),
+                "database": any("lookup" in str(a.get("activity_type") or "").lower() or "sql" in str(a.get("activity_type") or "").lower() for a in runtime_tracker),
+                "streaming": False,
+                "batch": True,
+            },
+            "ingestion_types": ["file_based", "batch"],
+            "file_types": reformatted_config["file_types"],
+            "dq_rules": {
+                "row_count_check": True,
+                "failure_status_tracking": True,
+                "schema_validation": True,
+            },
+            "pipeline_capabilities": {
+                "copy_activity": len(copy_activities) > 0,
+                "web_activity": any("web" in str(a.get("activity_type") or "").lower() for a in runtime_tracker),
+                "lookup_activity": any("lookup" in str(a.get("activity_type") or "").lower() for a in runtime_tracker),
+                "notebook_activity": len(notebooks) > 0,
+                "lakehouse": has_lakehouse,
+                "warehouse": has_warehouse,
+                "bronze": True,
+                "silver": True,
+                "gold": True,
+            },
+            "interactive_flow": activity_names or ["Fabric Runtime Execution"],
+            "reformatted_config": reformatted_config,
+            "data_pipelines": [{
+                "name": pipeline_name,
+                "type": "DataPipeline",
+                "platform": "Microsoft Fabric",
+                "activities": activity_names,
+                "activity_count": activity_count,
+                "configuration": exec_summary,
+            }],
+            "ingestion_details": {
+                "target": "fabric",
+                "source_type": "FABRIC_RUNTIME",
+                "source_path": source_path,
+                "supported_modes": ["file_based", "batch"],
+            },
+            "llm_summary": f"Fabric runtime intelligence captured for pipeline '{pipeline_name}'. Actual metrics used for configuration.",
+        }
+
+    # ORIGINAL RULE-BASED EXTRACTION FOR STATIC SCANS
     resources = original_config.get("resources") if isinstance(original_config, dict) else []
     resources = resources if isinstance(resources, list) else []
     activities = []
@@ -378,15 +495,15 @@ def _fabric_rule_extract(client_name: str, original_config: Dict[str, Any], raw_
         "schema_validation": "schema" in all_text,
     }
 
-    flow = _fabric_activity_flow(resources) or ["Fabric DataPipeline"]
-    pipeline_name = next((r.get("name") for r in resources if r.get("name")), "Fabric DataPipeline")
+    flow = _fabric_activity_flow(resources) or []
+    pipeline_name = next((r.get("name") for r in resources if r.get("name")), "Unknown Fabric Pipeline")
     copy_activities = [a.get("name") for a in activities if "copy" in str(a.get("type") or "").lower()]
-    notebooks = [a.get("name") for a in activities if "notebook" in str(a.get("type") or "").lower()]
+    notebooks = [a.get("activity_name") for a in activities if "notebook" in str(a.get("activity_type") or "").lower()]
 
     reformatted_config = {
         "client_name": client_name,
         "source_type": "FABRIC",
-        "source_path": f"fabric://{pipeline_name}",
+        "source_path": f"fabric://{pipeline_name}" if pipeline_name != "Unknown Fabric Pipeline" else "",
         "pipeline_name": pipeline_name,
         "activity_count": len(activities),
         "activities": activity_names,
@@ -402,7 +519,7 @@ def _fabric_rule_extract(client_name: str, original_config: Dict[str, Any], raw_
     }
 
     data_pipelines = [{
-        "name": resource.get("name") or "Fabric DataPipeline",
+        "name": resource.get("name") or "Fabric Pipeline",
         "type": "DataPipeline",
         "platform": "Microsoft Fabric",
         "activities": activity_names,
@@ -435,7 +552,7 @@ def _fabric_rule_extract(client_name: str, original_config: Dict[str, Any], raw_
         "ingestion_details": {
             "target": "fabric",
             "source_type": "FABRIC",
-            "source_path": f"fabric://{pipeline_name}",
+            "source_path": f"fabric://{pipeline_name}" if pipeline_name != "Unknown Fabric Pipeline" else "",
             "supported_modes": ingestion_types,
         },
         "llm_summary": "Fabric pipeline definition extracted from live Fabric API and normalized for DEA.",

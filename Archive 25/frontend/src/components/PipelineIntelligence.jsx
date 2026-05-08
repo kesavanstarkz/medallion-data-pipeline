@@ -556,6 +556,17 @@ export default function PipelineIntelligence({
         return;
       }
       setRuntimeAnalysis(payload);
+      // Merge runtime-generated config into the main analysis data
+      if (payload.reformatted_config) {
+        setData((prev) => ({
+          ...prev,
+          ...payload, // Include all runtime details
+          reformatted_config: {
+            ...(prev?.reformatted_config || {}),
+            ...payload.reformatted_config
+          }
+        }));
+      }
     } catch (runtimeCaptureError) {
       if (requestId !== runtimeCaptureRequestRef.current) return;
       setRuntimeError(runtimeCaptureError?.message || 'Runtime intelligence capture failed.');

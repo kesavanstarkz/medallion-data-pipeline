@@ -24,14 +24,41 @@ export default function StepConfig({
   }, [intelligenceData]);
 
   async function loadConfig() {
+    // 1. Resolve parameters from props OR intelligenceData
+    const config = intelligenceData?.reformatted_config || {};
+    
+    const resolvedClientName = selectedClient || config.client_name;
+    const resolvedSourceType = sourceType || config.source_type || config.discovery_mode;
+    const resolvedDatasetIds = folderPath || config.source?.artifact_id || config.targets?.artifact_id;
+
+    // 5. Debug logging before API call
+    console.log("master-config request", {
+      client_name: resolvedClientName,
+      source_type: resolvedSourceType,
+      dataset_ids: resolvedDatasetIds
+    });
+
+    // 4. Frontend guard: Prevent EMPTY VALUES
+    if (!resolvedSourceType || !resolvedDatasetIds) {
+      console.warn("Runtime configuration missing required metadata for master-config fetch.");
+      // If we are in Fabric mode and have intelligence, this is an error
+      if (fabricMode === 'DEPLOY' || intelligenceData) {
+        toast('Runtime configuration missing required metadata (Source Type or Dataset IDs).', 'error');
+        return;
+      }
+      // Otherwise just skip loading for now
+      return;
+    }
+
     setLoading(true);
     try {
       await syncMasterConfig();
-      const res = await call(`/orchestrate/master-config?client_name=${encodeURIComponent(selectedClient)}&source_type=${encodeURIComponent(sourceType || '')}&dataset_ids=${encodeURIComponent(folderPath || '')}`);
+      const res = await call(`/orchestrate/master-config?client_name=${encodeURIComponent(resolvedClientName)}&source_type=${encodeURIComponent(resolvedSourceType)}&dataset_ids=${encodeURIComponent(resolvedDatasetIds)}`);
+      
       console.debug('Master config fetch response', {
-        client_name: selectedClient,
-        sourceType,
-        folderPath,
+        client_name: resolvedClientName,
+        sourceType: resolvedSourceType,
+        folderPath: resolvedDatasetIds,
         rows: res?.config?.length || 0,
         message: res?.message,
       });
@@ -64,47 +91,45 @@ export default function StepConfig({
   async function saveConfig() {
     setSaving(true);
     
-    // Prepare payload
-    const clientName = selectedClient || localStorage.getItem('client_name') || "fabric_client";
-    let payload = {
-      client_name: clientName,
-      config: configData
-    };
-
-    if (fabricMode === "DEPLOY" && configData.length === 0 && intelligenceData?.reformatted_config) {
-        // Construct a single config row from intelligence data if table is empty
-        const extractedJson = intelligenceData.reformatted_config;
-        const autoRow = {
-            dataset_id: extractedJson.dataset_id || `fabric_${Date.now()}`,
-            client_name: selectedClient || "fabric_client",
-            source_type: "FABRIC",
-            source_folder: extractedJson.source_path || "fabric://pipeline",
-            source_object: extractedJson.pipeline_name || extractedJson.name || "FabricPipeline",
-            file_format: (extractedJson.file_types && extractedJson.file_types[0]) || "JSON",
-            is_active: true,
-            load_type: "full",
-        };
-        payload.config = [autoRow];
-    }
-
-    // Fix 2: Prevent EMPTY VALUES
-    if (!payload.client_name || !payload.config || payload.config.length === 0) {
-        console.error("Invalid payload:", payload);
-        toast('Configuration data is empty. Please sync or edit before saving.', 'warning');
-        setSaving(false);
-        return;
-    }
-
+    // Prepare parameters
+    const clientName = selectedClient || intelligenceData?.reformatted_config?.client_name || localStorage.getItem('client_name');
+    
     try {
-      const res = await call('/orchestrate/master-config/update', 'POST', payload);
-      if (res && res.status === 'SUCCESS') {
-          toast('Configuration saved successfully', 'success');
-          setConfigPersisted?.(true);
+      let res;
+      // If we are in Fabric mode and have intelligence, use the specialized save endpoint
+      if (intelligenceData?.reformatted_config && (fabricMode === 'DEPLOY' || configData.length === 0)) {
+        console.log("Saving Fabric runtime config via specialized endpoint");
+        res = await call('/orchestrate/save-master-config', 'POST', {
+          client_name: clientName,
+          reformatted_config: intelligenceData.reformatted_config
+        });
       } else {
-          throw new Error('Save failed');
+        // Standard save flow for manual edits
+        let payload = {
+          client_name: clientName,
+          config: configData
+        };
+
+        if (payload.config.length === 0) {
+            toast('Configuration data is empty. Please sync or edit before saving.', 'warning');
+            setSaving(false);
+            return;
+        }
+
+        res = await call('/orchestrate/master-config/update', 'POST', payload);
+      }
+
+      if (res && res.status === 'SUCCESS') {
+          toast('Configuration saved successfully ✔', 'success');
+          setConfigPersisted?.(true);
+          // Reload config to refresh the table state from the new CSV/DB
+          loadConfig();
+      } else {
+          throw new Error(res?.detail || res?.message || 'Save failed');
       }
     } catch (e) {
-      toast('Failed to save configuration', 'error');
+      console.error("Save config failed:", e);
+      toast('Failed to save configuration: ' + e.message, 'error');
       setConfigPersisted?.(false);
     } finally {
       setSaving(false);
@@ -273,17 +298,22 @@ export default function StepConfig({
           <button
             className="orch-btn ghost"
             onClick={saveConfig}
-            disabled={saving || loading || !(configData.length > 0 || (fabricMode === 'DEPLOY' && !!intelligenceData?.reformatted_config))}
+            disabled={saving || loading || !(configData.length > 0 || (intelligenceData?.reformatted_config?.client_name && intelligenceData?.reformatted_config?.source_type && intelligenceData?.reformatted_config?.source_path))}
           >
             <FiSave style={{ marginRight: 6 }} /> {saving ? 'Saving...' : 'Save Config'}
           </button>
           <button
             className="orch-btn primary step-next-btn"
             onClick={async () => {
-              if (configData.length > 0) await saveConfig();
+              // Automatically persist if we are in intelligence mode and haven't saved yet
+              if (configData.length === 0 && intelligenceData?.reformatted_config) {
+                 await saveConfig();
+              } else if (configData.length > 0) {
+                 await saveConfig();
+              }
               onNext();
             }}
-            disabled={loading || (configData.length === 0 && !generatedConfigText)}
+            disabled={loading || (configData.length === 0 && !intelligenceData?.reformatted_config)}
           >
             Commit & Continue →
           </button>

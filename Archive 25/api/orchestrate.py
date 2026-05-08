@@ -309,7 +309,7 @@ def run(
         raise HTTPException(status_code=500, detail=str(e))
         
 @router.get("/master-config")
-def get_master_config(client_name: str, source_type: str = None, dataset_ids: str = None, stream: bool = False):
+def get_master_config(client_name: str, source_type: str = None, dataset_ids: str = None, stream: bool = False, db: Session = Depends(get_db)):
     """
     Retrieves the Master Configuration CSV for a given client.
     Optionally filters by a comma-separated list of dataset_ids.
@@ -323,7 +323,6 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
     key = mgr._get_config_key(client_name)
     
     try:
-
         import pandas as pd
         import numpy as np
         import hashlib
@@ -502,6 +501,40 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
 
         
         if df.empty:
+             # LAST RESORT: Check for dynamic Fabric Runtime Config in DB (MasterConfigAuthoritative)
+             from models.master_config import MasterConfigAuthoritative
+             runtime_results = db.query(MasterConfigAuthoritative).filter(
+                 MasterConfigAuthoritative.client_name == client_name,
+                 MasterConfigAuthoritative.is_active == True,
+                 MasterConfigAuthoritative.source_type.in_(["FABRIC", "FABRIC_RUNTIME"])
+             ).all()
+             
+             if runtime_results:
+                 logger.info(f"Found {len(runtime_results)} runtime config rows for {client_name} in DB.")
+                 records = []
+                 for r in runtime_results:
+                     records.append({
+                         "dataset_id": r.dataset_id,
+                         "pipeline_id": r.pipeline_id,
+                         "client_name": r.client_name,
+                         "source_type": r.source_type,
+                         "source_folder": r.source_folder,
+                         "source_object": r.source_object,
+                         "file_format": r.file_format,
+                         "raw_layer_path": r.raw_layer_path,
+                         "target_layer_bronze": r.target_layer_bronze,
+                         "target_layer_silver": r.target_layer_silver,
+                         "is_active": r.is_active,
+                         "load_type": r.load_type,
+                     })
+                 
+                 if stream:
+                     def runtime_stream():
+                         for rec in records: yield _json_line(rec)
+                         yield _json_line({"status": "SUCCESS", "completed": True})
+                     return StreamingResponse(runtime_stream(), media_type="application/x-ndjson")
+                 return {"client_name": client_name, "config": records}
+
              if stream:
                  def empty_gen(): yield _json_line({"client_name": client_name, "message": "No config found"})
                  return StreamingResponse(empty_gen(), media_type="application/x-ndjson")
@@ -526,6 +559,71 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
     except Exception as e:
         logger.error(f"Failed to fetch master config for {client_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/save-master-config")
+def save_master_config(request: dict, db: Session = Depends(get_db)):
+    """
+    Explicit endpoint to persist Fabric runtime intelligence config.
+    Upsert by client_name + artifact_id.
+    """
+    client_name = request.get("client_name")
+    if not client_name:
+        raise HTTPException(status_code=400, detail="client_name is required")
+    
+    reformatted = request.get("reformatted_config") or request
+    source_meta = reformatted.get("source") or {}
+    # Use artifact_id as dataset_id if possible, otherwise pipeline_name
+    dataset_id = source_meta.get("artifact_id") or reformatted.get("pipeline_name") or "fabric_pipeline"
+    
+    # Map to Master Config Schema
+    from core.master_config_manager import MasterConfigManager, MASTER_CONFIG_COLUMNS
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime
+    
+    mgr = MasterConfigManager()
+    key = mgr._get_config_key(client_name)
+    df = mgr._get_existing_config(key)
+    
+    # Construct a row
+    new_row = {
+        "dataset_id": dataset_id,
+        "pipeline_id": client_name.upper(),
+        "client_name": client_name,
+        "source_type": reformatted.get("source_type") or "FABRIC_RUNTIME",
+        "source_folder": reformatted.get("source_path") or "",
+        "source_object": reformatted.get("pipeline_name") or "Fabric Pipeline",
+        "file_format": (reformatted.get("file_types") or ["CSV"])[0],
+        "target_layer_bronze": f"Bronze/{client_name}/{reformatted.get('pipeline_name')}",
+        "target_layer_silver": f"Silver/{client_name}/{reformatted.get('pipeline_name')}",
+        "is_active": True,
+        "load_type": "full",
+        "created_at": datetime.utcnow().isoformat()
+    }
+    
+    # Upsert logic for CSV
+    if not df.empty and "dataset_id" in df.columns:
+        df = df[df["dataset_id"] != dataset_id]
+    
+    new_df = pd.DataFrame([new_row])
+    # Ensure columns match MASTER_CONFIG_COLUMNS
+    for col in MASTER_CONFIG_COLUMNS:
+        if col not in new_df.columns:
+            new_df[col] = None
+    new_df = new_df[MASTER_CONFIG_COLUMNS]
+    
+    df = pd.concat([df, new_df], ignore_index=True) if not df.empty else new_df
+    mgr._save_config(df, key)
+    
+    # IMMEDIATELY SYNC TO DB so Step 4/6 finds the records
+    try:
+        from api.dq import sync_master_config, SyncRequest
+        sync_master_config(SyncRequest(client_name=client_name), db)
+    except Exception as sync_err:
+        logger.warning(f"Fabric runtime config DB sync failed: {sync_err}")
+    
+    return {"status": "SUCCESS", "message": "Master configuration persisted."}
 
 class MasterConfigUpdateRequest(BaseModel):
     client_name: str

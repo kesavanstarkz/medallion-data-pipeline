@@ -1199,9 +1199,17 @@ async def execute_and_capture_runtime_intelligence(
         },
         "actual_source_to_target_mapping": lineage,
         "runtime_notebook_parameters": runtime_notebook_parameters,
-        "runtime_sql_queries": runtime_sql_queries,
         "runtime_source_discovery": runtime_source_discovery,
     }
+    
+    # Build dynamic reformatted_config for runtime intelligence
+    reformatted_config = _build_runtime_reformatted_config(payload, client_name)
+    if reformatted_config.get("activities"):
+        logger.info("Runtime config generated dynamically")
+    else:
+        logger.warning("Using fallback config because runtime response is empty or missing activities")
+    
+    payload["reformatted_config"] = reformatted_config
 
     _persist_runtime_capture(
         client_name=client_name,
@@ -1222,3 +1230,97 @@ async def execute_and_capture_runtime_intelligence(
         )
 
     return payload
+
+
+def _build_runtime_reformatted_config(payload: Dict[str, Any], client_name: str) -> Dict[str, Any]:
+    runtime_metrics = payload.get("runtime_metrics") or {}
+    runtime_tracker = payload.get("runtime_activity_tracker") or []
+    runtime_source = payload.get("runtime_source_discovery") or {}
+    source_conn = runtime_source.get("source_connection") or {}
+    target_conn = runtime_source.get("target_connection") or {}
+    exec_summary = payload.get("runtime_execution_summary") or {}
+
+    activity_count = runtime_metrics.get("total_activities") or len(runtime_tracker)
+    activity_names = [a.get("activity_name") for a in runtime_tracker if a.get("activity_name")]
+    copy_activities = [a.get("activity_name") for a in runtime_tracker if str(a.get("activity_type") or "").lower() == "copy"]
+    
+    # linked_services -> Extract from multiple sources
+    linked_services = []
+    
+    def extract_ls(obj):
+        if not isinstance(obj, dict): return
+        # Extract from runtime_values / activity_outputs structure
+        # path: input.source.datasetSettings.linkedService.name
+        ls_name = _safe_get(obj, ["input", "source", "datasetSettings", "linkedService", "name"])
+        if ls_name: linked_services.append(ls_name)
+        ls_name = _safe_get(obj, ["input", "sink", "datasetSettings", "linkedService", "name"])
+        if ls_name: linked_services.append(ls_name)
+        # Also check simple linkedServiceName
+        ls_name = obj.get("linkedServiceName") or _safe_get(obj, ["input", "linkedServiceName"])
+        if ls_name: linked_services.append(ls_name)
+
+    # 1. runtime_values
+    for val in payload.get("runtime_values", {}).values():
+        extract_ls(val)
+    # 2. activity_outputs
+    for out in payload.get("activity_outputs", {}).values():
+        extract_ls(out)
+    # 3. runtime_payload_viewer.activity_runs
+    for run in payload.get("runtime_payload_viewer", {}).get("activity_runs", []):
+        extract_ls(run)
+    
+    linked_services = sorted(list(set(linked_services)))
+
+    # file_types -> infer from extension
+    file_types = []
+    source_file = source_conn.get("file_name") or ""
+    if "." in source_file:
+        ext = source_file.split(".")[-1].lower()
+        if ext in ["csv", "json", "parquet", "tsv", "txt"]:
+            file_types.append(ext)
+    
+    if not file_types and source_conn.get("format"):
+        file_types.append(str(source_conn["format"]).lower())
+    
+    # delimiter_config
+    delimiter_config = {
+        "column_delimiter": source_conn.get("delimiter", ","),
+        "quote_char": source_conn.get("quote_char", "\""),
+        "escape_char": source_conn.get("escape_char", "\\\\"),
+        "header": source_conn.get("header_enabled", True)
+    }
+
+    return {
+        "client_name": client_name,
+        "source_type": source_conn.get("source_type", "DelimitedTextSource"),
+        "discovery_mode": "FABRIC_RUNTIME",
+        "source_path": source_conn.get("resolved_path") or source_conn.get("full_path") or f"fabric://{exec_summary.get('pipeline_name', 'Fabric')}",
+        "pipeline_name": exec_summary.get("pipeline_name", "Fabric Runtime Pipeline"),
+        
+        "source": {
+            "workspace_id": source_conn.get("workspace_id"),
+            "artifact_id": source_conn.get("artifact_id")
+        },
+        
+        "activity_count": activity_count,
+        "activities": activity_names,
+        "copy_activities": copy_activities,
+        "linked_services": linked_services,
+        "file_types": [ft.upper() for ft in file_types],
+        
+        "delimiter_config": delimiter_config,
+        
+        "targets": {
+            "lakehouse": str(target_conn.get("storage_type") or "").lower() == "lakehouse",
+            "warehouse": str(target_conn.get("storage_type") or "").lower() == "warehouse",
+            "target_type": target_conn.get("target_type") or target_conn.get("sink_type") or "DelimitedTextSink",
+            "connector_type": target_conn.get("connector_type") or "DelimitedTextSink",
+            "storage_type": target_conn.get("storage_type"),
+            "workspace_id": target_conn.get("workspace_id"),
+            "artifact_id": target_conn.get("artifact_id"),
+            "folder_path": target_conn.get("folder_path"),
+            "file_name": target_conn.get("file_name"),
+            "full_path": target_conn.get("full_path"),
+            "resolved_path": target_conn.get("resolved_path")
+        }
+    }
