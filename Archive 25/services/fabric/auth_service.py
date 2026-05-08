@@ -43,6 +43,31 @@ class FabricAuthService:
         """Get OneLake DFS token using the Azure Storage resource scope."""
         return await self.get_client_token_for_scope(ONELAKE_STORAGE_SCOPE)
 
+    async def get_obo_storage_token(self, user_token: str) -> str:
+        """Get Azure Storage token on behalf of a user using OBO flow."""
+        if not self.tenant_id or not self.client_id or not self.client_secret:
+            raise HTTPException(
+                status_code=500,
+                detail="Azure client credentials are not fully configured for backend OBO token acquisition.",
+            )
+        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": user_token,
+            "scope": ONELAKE_STORAGE_SCOPE,
+            "requested_token_use": "on_behalf_of",
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, data=data)
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"Failed to get OBO token for storage scope: {resp.text}",
+                )
+            return resp.json().get("access_token")
+
     def get_auth_url(self, redirect_uri):
         """Get URL for Interactive SSO login"""
         scope = "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All https://api.fabric.microsoft.com/Item.ReadWrite.All offline_access"

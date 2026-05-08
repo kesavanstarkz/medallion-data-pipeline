@@ -227,17 +227,26 @@ def _direct_preview_from_bytes(content: bytes, source_connection: Dict[str, Any]
     }
 
 
+import re
+import urllib.parse
+
 def _onelake_candidate_urls(source_connection: Dict[str, Any]) -> List[str]:
     workspace_id = source_connection.get("workspace_id")
     artifact_id = source_connection.get("artifact_id")
     resolved_path = str(source_connection.get("resolved_path") or "").lstrip("/")
     if not workspace_id or not artifact_id or not resolved_path:
         return []
+    
+    encoded_path = urllib.parse.quote(resolved_path, safe="/")
+    
+    if re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", artifact_id):
+        return [f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}/{encoded_path}"]
+        
     item_type = str((source_connection.get("connection_metadata") or {}).get("itemType") or "Lakehouse")
     return [
-        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}/{resolved_path}",
-        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.{item_type}/{resolved_path}",
-        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.Lakehouse/{resolved_path}",
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}/{encoded_path}",
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.{item_type}/{encoded_path}",
+        f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{artifact_id}.Lakehouse/{encoded_path}",
     ]
 
 
@@ -547,69 +556,14 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
         "format": source_connection.get("format"),
     })
 
-    storage_token: Optional[str] = None
-    if strategy in {"direct_csv", "direct_json", "direct_file", "onelake_direct", "parquet_preview"}:
-        try:
-            storage_token = await FabricAuthService().get_storage_token()
-            diagnostics.append({
-                "mode": "auth_resolution",
-                "status": "success",
-                "token_scope": ONELAKE_STORAGE_SCOPE,
-                "token_audience": _decode_token_audience(storage_token),
-                "token_source": "backend_client_credentials",
-            })
-            logger.info(
-                "Runtime preview auth resolved | strategy=%s token_scope=%s token_audience=%s path=%s",
-                strategy,
-                ONELAKE_STORAGE_SCOPE,
-                _decode_token_audience(storage_token),
-                source_connection.get("resolved_path"),
-            )
-        except Exception as exc:
-            diagnostics.append({
-                "mode": "auth_resolution",
-                "status": "failed",
-                "token_scope": ONELAKE_STORAGE_SCOPE,
-                "token_source": "backend_client_credentials",
-                "error": str(exc),
-            })
-            logger.warning(
-                "Runtime preview storage token acquisition failed | strategy=%s path=%s error=%s",
-                strategy,
-                source_connection.get("resolved_path"),
-                exc,
-            )
+    # Direct OneLake preview strategy is disabled. Relying on Spark Notebook fallback.
+    diagnostics.append({
+        "mode": "onelake_direct",
+        "status": "skipped",
+        "reason": "Direct OneLake preview is disabled. Using Spark Notebook strategy."
+    })
 
-    try:
-        direct_preview = await _execute_direct_preview_strategy(
-            strategy=strategy,
-            source_connection=source_connection,
-            storage_token=storage_token,
-            db=db,
-            diagnostics=diagnostics,
-        )
-        if direct_preview:
-            direct_preview["diagnostics"] = diagnostics
-            direct_preview["resolved_source"] = direct_preview.get("resolved_source") or source_connection
-            return direct_preview
-    except HTTPException:
-        raise
-    except Exception as exc:
-        diagnostics.append({
-            "mode": "direct_preview",
-            "status": "failed",
-            "preview_strategy": strategy,
-            "error": str(exc),
-        })
-
-    if _is_lightweight_preview_strategy(strategy, source_connection):
-        diagnostics.append({
-            "mode": "spark_notebook",
-            "status": "skipped",
-            "reason": "Spark notebook fallback is disabled for lightweight runtime previews.",
-            "preview_strategy": strategy,
-        })
-    elif fabric_bearer_token and source_connection.get("workspace_id"):
+    if fabric_bearer_token and source_connection.get("workspace_id"):
         diagnostics.append({
             "mode": "spark_notebook",
             "status": "attempted",
@@ -647,18 +601,24 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
                     **item,
                 })
             if notebook_preview.get("preview_error"):
+                error_msg = str(notebook_preview.get("preview_error"))
                 diagnostics.append({
                     "mode": "spark_notebook",
                     "status": "failed",
-                    "error": notebook_preview.get("preview_error"),
+                    "error": error_msg,
                     "resolved_path": notebook_preview.get("resolved_path") or source_connection.get("resolved_path"),
                 })
-                provisioning_detail = notebook_preview.get("provisioning_detail")
-                if isinstance(provisioning_detail, dict):
-                    diagnostics.append({
-                        "mode": "spark_notebook_provisioning",
-                        **{k: v for k, v in provisioning_detail.items() if k != "notebook_diagnostics"},
-                    })
+                if "403" in error_msg or "Forbidden" in error_msg or "permission" in error_msg.lower() or "authorization" in error_msg.lower():
+                    raise HTTPException(status_code=403, detail=f"Workspace/lakehouse permission issue: {error_msg}")
+                if "404" in error_msg or "not found" in error_msg.lower() or "missing" in error_msg.lower():
+                    raise HTTPException(status_code=404, detail=f"File missing: {error_msg}")
+                if "408" in error_msg or "timeout" in error_msg.lower():
+                    raise HTTPException(status_code=408, detail=f"Notebook execution timeout: {error_msg}")
+                if "non-json" in error_msg.lower() or "malformed" in error_msg.lower():
+                    raise HTTPException(status_code=500, detail=f"Notebook returned malformed JSON: {error_msg}")
+                if "without an exitvalue" in error_msg.lower() or "missing exitvalue" in error_msg.lower():
+                    raise HTTPException(status_code=500, detail=f"Notebook completed but exit value missing: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Spark execution failure: {error_msg}")
             else:
                 diagnostics.append({
                     "mode": "spark_notebook",
@@ -670,14 +630,24 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
                 notebook_preview["diagnostics"] = diagnostics
                 notebook_preview["source_name"] = _runtime_dataset_name(source_connection)
                 notebook_preview["resolved_source"] = notebook_preview.get("resolved_source") or universal_request.get("resolved_source")
+                
+                # Structured Logging
+                logger.info(
+                    "Spark Preview Success | workspace_id=%s artifact_id=%s resolved_path=%s notebook_id=%s operation_id=%s schema_count=%s sample_row_count=%s",
+                    source_connection.get("workspace_id"),
+                    source_connection.get("artifact_id"),
+                    notebook_preview.get("resolved_path") or source_connection.get("resolved_path"),
+                    notebook_preview.get("notebook_id", "resolved"),
+                    notebook_preview.get("operation_id", "cached_or_resolved"),
+                    len(notebook_preview.get("schema") or []),
+                    len(notebook_preview.get("sample_rows") or notebook_preview.get("preview_rows") or []),
+                )
+                
                 return notebook_preview
+        except HTTPException:
+            raise
         except Exception as exc:
-            diagnostics.append({
-                "mode": "spark_notebook",
-                "status": "failed",
-                "error": str(exc),
-                "resolved_path": source_connection.get("resolved_path"),
-            })
+            raise HTTPException(status_code=500, detail=f"Spark execution failure: {str(exc)}")
     else:
         diagnostics.append({
             "mode": "spark_notebook",
@@ -685,44 +655,7 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
             "reason": "Notebook preview requires a Fabric bearer token and workspace id, and is enabled only for non-lightweight preview strategies.",
         })
 
-    if source_path.startswith(("az://", "s3://", "https://")):
-        diagnostics.append({
-            "mode": "filesystem",
-            "status": "attempted",
-            "path": source_path,
-        })
-        try:
-            payload = preview_file(path=source_path, db=db)
-            rows = payload.get("rows") or []
-            columns = payload.get("columns") or []
-            return {
-                **payload,
-                "preview_rows": [
-                    {column: row[index] if isinstance(row, list) and index < len(row) else None for index, column in enumerate(columns)}
-                    for row in rows[:25]
-                ] if columns and rows else [],
-                "schema": schema_discovery.get("columns") or [],
-                "row_count_estimate": len(rows),
-                "resolved_path": source_connection.get("resolved_path") or source_path,
-                "preview_mode": "filesystem",
-                "source_name": _runtime_dataset_name(source_connection),
-                "diagnostics": diagnostics,
-            }
-        except Exception as exc:
-            diagnostics.append({
-                "mode": "filesystem",
-                "status": "failed",
-                "path": source_path,
-                "error": str(exc),
-            })
-    else:
-        diagnostics.append({
-            "mode": "filesystem",
-            "status": "skipped",
-            "reason": "Resolved path is not an absolute storage URI.",
-            "path": source_path,
-        })
-
+    # Filesystem fallback is disabled.
     diagnostics.append({
         "mode": "spark",
         "status": "unavailable",
@@ -745,6 +678,20 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
     sample_preview = _structured_runtime_sample_preview(source_connection, schema_discovery, diagnostics)
     if sample_preview.get("preview_rows"):
         return sample_preview
+
+    for diag in diagnostics:
+        if diag.get("status") == "failed":
+            error_str = str(diag.get("error") or diag.get("response_excerpt") or "")
+            if "403" in str(diag.get("http_status")) or "Forbidden" in error_str or "403" in error_str or "Authorization" in error_str:
+                raise HTTPException(status_code=403, detail="Notebook execution permission issue. Authorization failed.")
+            if "404" in str(diag.get("http_status")) or "NotFound" in error_str or "404" in error_str or "Path does not exist" in error_str:
+                raise HTTPException(status_code=404, detail="File missing. The requested artifact or file could not be found.")
+
+    if any(d.get("mode") == "spark_notebook" and d.get("status") == "failed" for d in diagnostics):
+        raise HTTPException(status_code=500, detail={
+            "message": "Spark execution failure.",
+            "diagnostics": diagnostics,
+        })
 
     raise HTTPException(status_code=400, detail={
         "message": "Runtime source preview could not access the physical Lakehouse file and no runtime sample rows were available.",

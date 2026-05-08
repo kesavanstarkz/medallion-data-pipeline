@@ -5,7 +5,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+import logging
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
 UNIVERSAL_PREVIEW_NOTEBOOK_NAME = "RuntimeUniversalPreviewNotebook"
@@ -40,208 +43,86 @@ def _normalize_format(value: Optional[str]) -> str:
 
 
 def build_universal_preview_notebook_source(preview_request: Dict[str, Any]) -> str:
-    request_json = json.dumps(preview_request, ensure_ascii=True)
-    return f"""import json
-import re
-
-try:
-    import notebookutils
-except Exception:  # pragma: no cover
-    import mssparkutils as notebookutils
-
-REQUEST = json.loads(r'''{request_json}''')
-RESULT = {{}}
-
-
-def compact(value):
-    if isinstance(value, dict):
-        return {{k: compact(v) for k, v in value.items() if v not in (None, "", [], {{}})}}
-    if isinstance(value, list):
-        return [compact(item) for item in value if item not in (None, "", [], {{}})]
-    return value
-
-
-def first_non_empty(*values):
-    for value in values:
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if isinstance(value, (list, dict)) and not value:
-            continue
-        return value
-    return None
-
-
-def build_lakehouse_abfss(meta):
-    workspace_id = meta.get("workspaceId") or meta.get("workspace_id")
-    artifact_id = meta.get("artifactId") or meta.get("artifact_id")
-    resolved_path = meta.get("resolvedPath") or meta.get("resolved_path")
-    if workspace_id and artifact_id and resolved_path:
-        item_type = meta.get("itemType") or "Lakehouse"
-        return f"abfss://{{workspace_id}}@onelake.dfs.fabric.microsoft.com/{{artifact_id}}.{{item_type}}/{{resolved_path.lstrip('/')}}"
-    return None
-
-
-def build_storage_path(spec):
-    meta = spec.get("connection_metadata") or {{}}
+    # Extract dynamic values from the preview_request
+    spec = preview_request.get("resolved_source") or preview_request
+    meta = spec.get("connection_metadata") or {}
+    read_options = spec.get("read_options") or {}
+    
+    # Resolve path
     source_type = str(spec.get("source_type") or "").lower()
     connector_type = str(spec.get("connector_type") or "").lower()
-    explicit = first_non_empty(meta.get("previewPath"), meta.get("fullPath"), meta.get("path"))
-    if explicit:
-        return explicit
-    if "lakehouse" in source_type or "lakehouse" in connector_type or "onelake" in source_type:
-        return build_lakehouse_abfss(meta)
-    if meta.get("abfssPath"):
-        return meta["abfssPath"]
-    if meta.get("s3Path"):
-        return meta["s3Path"]
-    if meta.get("blobPath"):
-        return meta["blobPath"]
-    return meta.get("resolvedPath") or meta.get("resolved_path")
+    explicit_path = meta.get("previewPath") or meta.get("fullPath") or meta.get("path")
+    if not explicit_path and ("lakehouse" in source_type or "lakehouse" in connector_type or "onelake" in source_type):
+        workspace_id = meta.get("workspaceId") or meta.get("workspace_id")
+        artifact_id = meta.get("artifactId") or meta.get("artifact_id")
+        resolved_path = meta.get("resolvedPath") or meta.get("resolved_path")
+        if workspace_id and artifact_id and resolved_path:
+            item_type = meta.get("itemType") or "Lakehouse"
+            explicit_path = f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{artifact_id}.{item_type}/{resolved_path.lstrip('/')}"
+    if not explicit_path:
+        explicit_path = meta.get("abfssPath") or meta.get("s3Path") or meta.get("blobPath") or meta.get("resolvedPath") or meta.get("resolved_path") or ""
 
+    # Resolve CSV options
+    header_enabled = bool(read_options.get("header", True))
+    delimiter = str(read_options.get("delimiter") or ",")
+    quote_char = str(read_options.get("quote") or '"')
+    escape_char = str(read_options.get("escape") or '\\')
 
-def normalize_strategy(spec):
-    strategy = str(spec.get("preview_strategy") or "").strip().lower()
-    fmt = str(spec.get("format") or "").strip().lower()
-    connector = str(spec.get("connector_type") or "").strip().lower()
-    meta = spec.get("connection_metadata") or {{}}
-    if strategy:
-        return strategy
-    if any(key in meta for key in ("endpoint", "url")) or connector in {{"rest", "restapi", "http", "graphql", "soap"}}:
-        return "rest_api"
-    if any(key in meta for key in ("jdbc_url", "table", "query")):
-        return "spark_jdbc"
-    if fmt in {{"delta"}}:
-        return "spark_delta"
-    if fmt in {{"csv", "txt", "tsv"}}:
-        return "spark_delimited"
-    if fmt:
-        return f"spark_{{fmt}}"
-    return "spark_file"
+    path_lit = json.dumps(explicit_path)
+    delim_lit = json.dumps(delimiter)
+    quote_lit = json.dumps(quote_char)
+    escape_lit = json.dumps(escape_char)
+    header_lit = "True" if header_enabled else "False"
 
+    # Construct strict PySpark CSV snippet as requested
+    return f"""# Fabric notebook source
 
-def schema_payload(df):
-    return [
-        {{
-            "column_name": field.name,
-            "data_type": field.dataType.simpleString(),
-            "nullable": field.nullable,
-            "ordinal_position": index + 1,
-        }}
-        for index, field in enumerate(df.schema.fields)
-    ]
+# METADATA ********************
 
+# CELL ********************
 
-def datatypes(df):
-    return [field.dataType.simpleString() for field in df.schema.fields]
+from pyspark.sql import SparkSession
+import json
+import traceback
 
+# In Microsoft Fabric, mssparkutils is built-in but can be imported if needed
+try:
+    from notebookutils import mssparkutils
+except ImportError:
+    pass
 
-def nullable_columns(df):
-    return [field.name for field in df.schema.fields if field.nullable]
-
-
-def preview_rows(df, limit_rows=25):
-    return [row.asDict(recursive=True) for row in df.limit(limit_rows).collect()]
-
-
-def build_reader(spec):
-    fmt = str(spec.get("format") or "").strip().lower()
-    strategy = normalize_strategy(spec)
-    path = build_storage_path(spec)
-    read_options = dict(spec.get("read_options") or {{}})
-    read_options = {{k: v for k, v in read_options.items() if v is not None}}
-    reader = spark.read.options(**read_options)
-    meta = spec.get("connection_metadata") or {{}}
-
-    if strategy == "spark_delimited":
-        return reader.csv(path)
-    if strategy == "spark_json":
-        return reader.json(path)
-    if strategy == "spark_parquet":
-        return reader.parquet(path)
-    if strategy == "spark_delta":
-        return reader.format("delta").load(path)
-    if strategy in {{"spark_orc", "spark_avro", "spark_xml", "spark_excel"}}:
-        return reader.format(fmt).load(path)
-    if strategy == "spark_jdbc":
-        jdbc_options = {{}}
-        jdbc_url = first_non_empty(meta.get("jdbc_url"), meta.get("connectionString"), meta.get("url"))
-        if jdbc_url:
-            jdbc_options["url"] = jdbc_url
-        dbtable = first_non_empty(meta.get("table"), meta.get("dbtable"))
-        query = meta.get("query")
-        if query:
-            jdbc_options["query"] = query
-        elif dbtable:
-            jdbc_options["dbtable"] = dbtable
-        for key in ("user", "password", "driver"):
-            if meta.get(key):
-                jdbc_options[key] = meta.get(key)
-        return spark.read.format("jdbc").options(**jdbc_options).load()
-    if strategy == "rest_api":
-        import requests
-
-        endpoint = first_non_empty(meta.get("endpoint"), meta.get("url"))
-        headers = meta.get("headers") or {{}}
-        response = requests.get(endpoint, headers=headers, timeout=60)
-        response.raise_for_status()
-        content_type = (response.headers.get("content-type") or "").lower()
-        if "json" in content_type:
-            payload = response.json()
-            if isinstance(payload, list):
-                rows = payload
-            elif isinstance(payload, dict):
-                rows = payload.get("value") or payload.get("data") or payload.get("items") or [payload]
-            else:
-                rows = [{{"value": payload}}]
-            if rows and not isinstance(rows[0], dict):
-                rows = [{{"value": item}} for item in rows]
-            return spark.createDataFrame(rows)
-        return spark.createDataFrame([{{"value": response.text}}])
-    if path:
-        if fmt == "json":
-            return reader.json(path)
-        if fmt == "parquet":
-            return reader.parquet(path)
-        if fmt == "delta":
-            return reader.format("delta").load(path)
-        return reader.load(path)
-    raise ValueError(f"Unable to resolve a preview reader for strategy={{strategy}} path={{path}}")
-
-
-def run_preview():
-    spec = REQUEST.get("resolved_source") or REQUEST
-    strategy = normalize_strategy(spec)
-    resolved_path = build_storage_path(spec)
-    df = build_reader(spec)
-    rows = preview_rows(df)
-    schema = schema_payload(df)
-    return compact({{
-        "preview_rows": rows,
-        "schema": schema,
-        "columns": [field["column_name"] for field in schema],
-        "datatypes": datatypes(df),
-        "nullable_columns": nullable_columns(df),
-        "row_count_estimate": len(rows),
-        "resolved_source": spec,
-        "resolved_path": resolved_path,
-        "preview_strategy": strategy,
-        "runtime_statistics": REQUEST.get("runtime_statistics") or {{}},
-    }})
-
+path = {path_lit}
 
 try:
-    RESULT = run_preview()
-except Exception as exc:
-    RESULT = {{
-        "preview_error": str(exc),
-        "resolved_source": REQUEST.get("resolved_source") or REQUEST,
-        "resolved_path": build_storage_path(REQUEST.get("resolved_source") or REQUEST),
-        "preview_strategy": normalize_strategy(REQUEST.get("resolved_source") or REQUEST),
+    df = spark.read \\
+        .option("header", {header_lit}) \\
+        .option("delimiter", {delim_lit}) \\
+        .option("quote", {quote_lit}) \\
+        .option("escape", {escape_lit}) \\
+        .csv(path)
+
+    sample_rows = df.limit(20).toPandas().to_dict(orient="records")
+
+    schema = [
+        {{
+            "name": f.name,
+            "type": str(f.dataType),
+            "nullable": f.nullable
+        }}
+        for f in df.schema.fields
+    ]
+
+    result = {{
+        "sample_rows": sample_rows,
+        "schema": schema
+    }}
+except Exception as e:
+    result = {{
+        "error": str(e),
+        "traceback": traceback.format_exc()
     }}
 
-notebookutils.notebook.exit(json.dumps(RESULT, default=str))
+mssparkutils.notebook.exit(json.dumps(result))
 """
 
 
@@ -290,32 +171,52 @@ class FabricUniversalPreviewService:
         cls._NOTEBOOK_CACHE[cls._cache_key(workspace_id, cached["displayName"])] = cached
         return cached
 
+    @classmethod
+    def _clear_cached_notebook(cls, workspace_id: str, display_name: str = UNIVERSAL_PREVIEW_NOTEBOOK_NAME) -> None:
+        cache_key = cls._cache_key(workspace_id, display_name)
+        if cache_key in cls._NOTEBOOK_CACHE:
+            del cls._NOTEBOOK_CACHE[cache_key]
+
     async def _wait_lro(self, response: httpx.Response) -> Dict[str, Any]:
         final_body: Dict[str, Any] = {}
         if response.status_code != 202:
             return self._json_object(response)
         location = response.headers.get("Location")
-        retry_after = int(response.headers.get("Retry-After", "2") or "2")
         if not location:
             return final_body
-        for _ in range(30):
-            await asyncio.sleep(max(retry_after, 1))
+            
+        backoff_intervals = [3, 6, 12, 20, 30]
+        start_time = time.time()
+        timeout = 300  # 5 minutes
+        attempt = 0
+        
+        while time.time() - start_time < timeout:
+            sleep_time = backoff_intervals[attempt] if attempt < len(backoff_intervals) else 30
+            await asyncio.sleep(sleep_time)
+            attempt += 1
+            
             poll = await self._request("GET", location)
             poll_body = self._json_object(poll)
             if poll.status_code in (200, 201, 204):
+                status = str(poll_body.get("status") or "").lower()
+                if status in ("failed", "canceled", "cancelled"):
+                    raise HTTPException(status_code=500, detail=f"Fabric LRO failed with status {status}: {poll.text}")
+                if status in ("notstarted", "running"):
+                    continue
                 final_body = poll_body or final_body
                 break
             if poll.status_code == 202:
-                retry_after = int(poll.headers.get("Retry-After", "2") or "2")
                 continue
             if poll.is_error:
                 raise HTTPException(status_code=poll.status_code, detail=f"Fabric LRO failed: {poll.text}")
+        
+        # Try to fetch result if applicable, but often ResourceLocation is in the poll_body
         result_url = f"{location.rstrip('/')}/result"
         result = await self._request("GET", result_url)
         if result.is_success:
             result_body = self._json_object(result)
             if result_body:
-                final_body = result_body
+                final_body.update(result_body)
         return final_body
 
     async def list_notebooks(self, workspace_id: str) -> List[Dict[str, Any]]:
@@ -379,14 +280,25 @@ class FabricUniversalPreviewService:
             raise HTTPException(status_code=response.status_code, detail=f"Create notebook failed: {response.text}")
         lro_body = await self._wait_lro(response)
         body = lro_body or self._json_object(response)
+        notebook_id = body.get("id") or _first_key(body, ["itemId", "artifactId", "notebookId", "workspaceObjectId"])
+        if not notebook_id and body.get("resourceLocation"):
+            notebook_id = body.get("resourceLocation").rstrip("/").split("/")[-1]
+            
         return {
             "body": body,
             "operationId": response.headers.get("x-ms-operation-id"),
             "requestId": response.headers.get("request-id") or response.headers.get("x-ms-request-id"),
             "location": response.headers.get("Location"),
-            "notebookId": body.get("id") or _first_key(body, ["itemId", "artifactId", "notebookId"]),
+            "notebookId": notebook_id,
             "displayName": body.get("displayName") or body.get("name") or display_name,
         }
+
+    async def delete_notebook(self, workspace_id: str, notebook_id: str) -> None:
+        url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{notebook_id}"
+        logger.info(f"Deleting stale notebook: {notebook_id} at {url}")
+        response = await self._request("DELETE", url)
+        if response.status_code not in (200, 202, 204, 404):
+            logger.warning(f"Failed to delete old notebook {notebook_id}: {response.text}")
 
     async def update_notebook_definition(self, workspace_id: str, notebook_id: str, source_code: str) -> None:
         payload_b64 = base64.b64encode(source_code.encode("utf-8")).decode("utf-8")
@@ -403,7 +315,7 @@ class FabricUniversalPreviewService:
         }
         response = await self._request(
             "POST",
-            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/notebooks/{notebook_id}/updateDefinition?updateMetadata=false",
+            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{notebook_id}/updateDefinition?updateMetadata=false",
             json=payload,
         )
         if response.status_code not in (200, 202):
@@ -430,8 +342,8 @@ class FabricUniversalPreviewService:
         display_name: str,
         notebook_id: Optional[str],
         diagnostics: List[Dict[str, Any]],
-        max_retries: int = 20,
-        base_delay_seconds: int = 3,
+        max_retries: int = 30,
+        base_delay_seconds: int = 4,
     ) -> Optional[Dict[str, Any]]:
         delay_seconds = base_delay_seconds
         for attempt in range(1, max_retries + 1):
@@ -480,27 +392,15 @@ class FabricUniversalPreviewService:
             })
             existing = await self.get_notebook(workspace_id, cached["notebookId"])
             if existing and existing.get("id"):
-                await self.update_notebook_definition(workspace_id, existing["id"], source_code)
-                return existing
+                diagnostics.append({"state": "notebook_delete_started", "notebookId": existing["id"]})
+                await self.delete_notebook(workspace_id, existing["id"])
+                self._clear_cached_notebook(workspace_id)
 
         existing = await self._resolve_notebook_by_name(workspace_id, UNIVERSAL_PREVIEW_NOTEBOOK_NAME)
         if existing and existing.get("id"):
-            self._set_cached_notebook(workspace_id, existing)
-            diagnostics.append({
-                "state": "notebook_visible",
-                "resolution": "precheck",
-                "workspaceId": workspace_id,
-                "notebookId": existing.get("id"),
-                "displayName": existing.get("displayName"),
-            })
-            diagnostics.append({
-                "state": "notebook_cached",
-                "workspaceId": workspace_id,
-                "notebookId": existing.get("id"),
-                "displayName": existing.get("displayName"),
-            })
-            await self.update_notebook_definition(workspace_id, existing["id"], source_code)
-            return existing
+            diagnostics.append({"state": "notebook_delete_started", "notebookId": existing["id"]})
+            await self.delete_notebook(workspace_id, existing["id"])
+            self._clear_cached_notebook(workspace_id)
 
         diagnostics.append({
             "state": "notebook_create_started",
@@ -525,7 +425,7 @@ class FabricUniversalPreviewService:
         )
         if not resolved or not resolved.get("id"):
             raise HTTPException(
-                status_code=500,
+                status_code=408,
                 detail={
                     "message": f"Unable to resolve the runtime universal preview notebook after creation. workspaceId={workspace_id} operationId={created.get('operationId') or ''}",
                     "workspaceId": workspace_id,
@@ -538,40 +438,51 @@ class FabricUniversalPreviewService:
             )
         self._set_cached_notebook(workspace_id, resolved)
         diagnostics.append({
-            "state": "notebook_cached",
+            "state": "notebook_cached_saved",
             "workspaceId": workspace_id,
             "notebookId": resolved.get("id"),
             "displayName": resolved.get("displayName"),
         })
-        await self.update_notebook_definition(workspace_id, resolved["id"], source_code)
         return resolved
 
     async def run_notebook(self, workspace_id: str, notebook_id: str) -> str:
         payload = {
             "executionData": {
-                "compute": "Spark"
+                "parameters": {}
             }
         }
-        response = await self._request(
-            "POST",
-            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/notebooks/{notebook_id}/jobs/execute/instances?beta=false",
-            json=payload,
-        )
+        url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{notebook_id}/jobs/instances?jobType=RunNotebook"
+        
+        logger.info(f"Notebook Execution Endpoint: {url} | Method: POST | JobType: RunNotebook | Payload: {json.dumps(payload)}")
+        
+        response = await self._request("POST", url, json=payload)
         if response.status_code not in (200, 201, 202):
+            if "InvalidJobType" in response.text:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "message": "Fabric returned InvalidJobType error.",
+                        "endpoint": url,
+                        "payload": payload,
+                        "error_response": response.text
+                    }
+                )
             raise HTTPException(status_code=response.status_code, detail=f"Run notebook failed: {response.text}")
+            
         location = response.headers.get("Location", "")
         job_instance_id = location.rstrip("/").split("/")[-1] if location else None
         body = self._json_object(response)
         job_instance_id = job_instance_id or body.get("id")
+        
+        logger.info(f"Notebook Run ID: {job_instance_id} | Location: {location}")
+        
         if not job_instance_id:
             raise HTTPException(status_code=500, detail="Notebook run did not return a job instance id.")
         return job_instance_id
 
     async def get_notebook_job_instance(self, workspace_id: str, notebook_id: str, job_instance_id: str) -> Dict[str, Any]:
-        response = await self._request(
-            "GET",
-            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/notebooks/{notebook_id}/jobs/execute/instances/{job_instance_id}?beta=true",
-        )
+        url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{notebook_id}/jobs/instances/{job_instance_id}"
+        response = await self._request("GET", url)
         if not response.is_success:
             raise HTTPException(status_code=response.status_code, detail=f"Get notebook job instance failed: {response.text}")
         body = self._json_object(response)
@@ -614,6 +525,8 @@ class FabricUniversalPreviewService:
                     "notebook_diagnostics": notebook_diagnostics,
                 }
             status = str(_first_key(instance, ["status", "state"]) or "")
+            logger.info(f"Notebook Run Poll Status: {status} | Run ID: {job_instance_id}")
+            
             if status.lower() in {"completed", "succeeded", "success"}:
                 notebook_diagnostics.append({
                     "state": "notebook_execution_completed",
@@ -623,17 +536,36 @@ class FabricUniversalPreviewService:
                     "status": status,
                 })
                 exit_value = _first_key(instance, ["exitValue"])
+                logger.info(f"Notebook Run Output (truncated): {str(exit_value)[:500] if exit_value else 'None'}")
+                logger.info(json.dumps(instance, indent=2))
+                
                 if not exit_value:
+                    logger.error(
+                        f"Missing exitValue! Notebook ID: {notebook_id} | Job Instance ID: {job_instance_id} | "
+                        f"Instance Payload: {json.dumps(instance)} | "
+                        f"Stdout: {str(_first_key(instance, ['stdout', 'logs']) or 'N/A')} | "
+                        f"Stderr: {str(_first_key(instance, ['stderr', 'error']) or 'N/A')}"
+                    )
                     return {
-                        "preview_error": "Notebook completed without an exitValue payload.",
-                        "job_instance": instance,
+                        "message": "Notebook completed but exit value missing",
+                        "raw_execution_response": instance,
+                        "stdout": _first_key(instance, ["stdout", "logs"]) or "N/A",
+                        "stderr": _first_key(instance, ["stderr", "error"]) or "N/A",
+                        "jobInstanceId": job_instance_id,
                         "notebook_diagnostics": notebook_diagnostics,
                     }
                 try:
                     payload = json.loads(exit_value)
-                    if isinstance(payload, dict):
-                        payload["notebook_diagnostics"] = notebook_diagnostics
-                    return payload
+                    if "error" in payload:
+                        return {
+                            "preview_error": f"Spark Exception: {payload['error']} | Traceback: {payload.get('traceback', '')}",
+                            "notebook_diagnostics": notebook_diagnostics,
+                        }
+                    return {
+                        "sample_rows": payload.get("sample_rows", []),
+                        "schema": payload.get("schema", []),
+                        "notebook_diagnostics": notebook_diagnostics,
+                    }
                 except Exception:
                     return {
                         "preview_error": "Notebook returned a non-JSON exit value.",

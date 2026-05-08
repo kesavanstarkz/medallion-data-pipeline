@@ -282,9 +282,6 @@ export default function PipelineIntelligence({
     }
 
     const artifactWorkspaceId = resolveConnectionWorkspaceId(connection);
-    if (artifactWorkspaceId && artifactWorkspaceId !== activeWorkspaceId) {
-      throw new Error('Artifact does not belong to selected workspace');
-    }
 
     if (!connection.artifact_id) {
       throw new Error('Runtime source is missing an artifact ID.');
@@ -301,10 +298,10 @@ export default function PipelineIntelligence({
     const payload = {
       source_connection: {
         ...connection,
-        workspace_id: activeWorkspaceId,
+        workspace_id: artifactWorkspaceId || activeWorkspaceId,
       },
       schema_discovery: schemaDiscovery,
-      workspaceId: activeWorkspaceId,
+      workspaceId: artifactWorkspaceId || activeWorkspaceId,
       artifactId: connection.artifact_id,
       rootFolder: connection.root_folder,
       folderPath: connection.folder_path,
@@ -610,7 +607,7 @@ export default function PipelineIntelligence({
 
   const handleUseRuntimeSource = () => {
     if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
-    const { activeWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
+    const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
     const sourcePath = runtimeSourceConnection.full_path || runtimeSourceConnection.folder_path || runtimeSourceConnection.file_name || '';
     const sourceFormat = runtimeSourceConnection.format ? [runtimeSourceConnection.format] : (data?.file_types || []);
     const merged = {
@@ -619,7 +616,7 @@ export default function PipelineIntelligence({
         ...runtimeDiscovery,
         source_connection: {
           ...runtimeSourceConnection,
-          workspace_id: activeWorkspaceId,
+          workspace_id: artifactWorkspaceId || activeWorkspaceId,
         },
       },
       ingestion_details: {
@@ -646,19 +643,19 @@ export default function PipelineIntelligence({
     setRuntimeSaveLoading(true);
     setRuntimeActionMessage(null);
     try {
-      const { activeWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
+      const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
       const response = await fetch(apiUrl('/discovery/fabric-runtime-source-save'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           client_name: clientName,
-          workspace_id: activeWorkspaceId,
+          workspace_id: artifactWorkspaceId || activeWorkspaceId,
           pipeline_id: selectedPipelineRef.current?.id || null,
           runtime_source_discovery: {
             ...runtimeDiscovery,
             source_connection: {
               ...runtimeSourceConnection,
-              workspace_id: activeWorkspaceId,
+              workspace_id: artifactWorkspaceId || activeWorkspaceId,
             },
           },
         }),
