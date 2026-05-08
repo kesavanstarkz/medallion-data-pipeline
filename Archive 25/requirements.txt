@@ -29,6 +29,8 @@ azure-storage-blob==12.25.1
 azure-storage-file-datalake==12.20.0
 azure-identity==1.21.0
 msal==1.32.0
+pyodbc==5.2.0
+httpx==0.28.1
 
 # GPT / cloud LLM integration. The API key stays backend-only in .env.
 openai==1.75.0

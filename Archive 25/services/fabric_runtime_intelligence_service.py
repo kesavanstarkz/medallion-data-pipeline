@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+
 from fastapi import HTTPException
 from core.database import SessionLocal
 from models.metadata import PipelineRunHistory
@@ -645,6 +646,7 @@ def _build_reusable_ingestion_config(
         "runtime_metrics": runtime_statistics,
         "pipeline_context": pipeline_summary,
     })
+
 
 
 def _build_runtime_source_discovery(
