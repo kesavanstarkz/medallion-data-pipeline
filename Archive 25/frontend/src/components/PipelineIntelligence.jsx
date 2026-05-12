@@ -8,6 +8,7 @@ import {
 import CloudPortalScanModal from './orchestration/CloudPortalScanModal';
 import PipelineFlowCanvas from './orchestration/PipelineFlowCanvas';
 import { apiUrl } from '../hooks/useApi';
+import DynamicPreviewTable from './DynamicPreviewTable';
 import 'reactflow/dist/style.css';
 import './PipelineIntelligence.css';
 
@@ -1026,32 +1027,12 @@ export default function PipelineIntelligence({
               )}
 
               <div className="pi-card pi-wide" style={{ marginTop: 16 }}>
-                <div className="pi-card-title"><FiFile /> Previewable Dataset</div>
-                {runtimePreviewLoading ? (
-                  <div className="pi-card-content">Loading source preview from runtime metadata...</div>
-                ) : runtimePreview?.rows?.length ? (
-                  <div style={{ overflowX: 'auto' }}>
-                    <div className="pi-card-content" style={{ marginBottom: 10 }}>
-                      <strong>{runtimePreview.source_name || runtimePreview.path}</strong> {runtimePreview.total_rows_approx ? `• ${runtimePreview.total_rows_approx}` : ''}
-                    </div>
-                    <table className="preview-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                      <thead>
-                        <tr>{(runtimePreview.columns || []).map((column) => <th key={column}>{column}</th>)}</tr>
-                      </thead>
-                      <tbody>
-                        {(runtimePreview.rows || []).slice(0, 15).map((row, index) => (
-                          <tr key={`preview-${index}`}>
-                            {(runtimePreview.columns || []).map((column, valueIndex) => (
-                              <td key={`${column}-${valueIndex}`}>{Array.isArray(row) ? compactValue(row[valueIndex]) : compactValue(row?.[column])}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="pi-card-content">Use <strong>Preview Data</strong> to load sampled rows and inferred schema from the captured runtime source.</div>
-                )}
+                <div className="pi-card-title"><FiFile /> Dynamic Runtime Preview</div>
+                <DynamicPreviewTable 
+                  initialData={runtimePreview} 
+                  workspaceId={runtimeSourceConnection.workspace_id}
+                  lakehouseId={runtimeSourceConnection.artifact_id}
+                />
               </div>
 
               <div className="pi-card pi-wide" style={{ marginTop: 16 }}>

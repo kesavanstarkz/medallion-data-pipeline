@@ -14,12 +14,12 @@ import httpx
 from services.pipeline_intelligence_service import analyze_pipeline_live
 from services.fabric_bundle_analysis_service import analyze_fabric_bundle
 from services.fabric_runtime_intelligence_service import execute_and_capture_runtime_intelligence
-from services.fabric.universal_preview_service import FabricSparkPreviewService
 from services.fabric.auth_service import FabricAuthService, ONELAKE_STORAGE_SCOPE
 from api.storage import preview_file
 from core.database import SessionLocal
 from core.database import get_db
-from core.utils import generate_dataset_id
+from core.utils import generate_dataset_id, DirectSparkPreviewService
+from services.fabric.universal_preview_service import FabricSparkPreviewService
 from models.api_source_config import APISourceConfig
 from models.master_config_authoritative import MasterConfigAuthoritative
 from models.master_config import MasterConfig
@@ -74,6 +74,12 @@ class RuntimeSourceSaveRequest(BaseModel):
     client_name: str
     pipeline_id: Optional[str] = None
     runtime_source_discovery: Dict[str, Any]
+
+
+class PreviewQueryRequest(BaseModel):
+    session_id: str
+    query: Optional[str] = None
+    sql_query: Optional[str] = None
 
 
 def _runtime_source_path(source_connection: Dict[str, Any]) -> str:
@@ -530,12 +536,6 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
     source_path = _runtime_source_path(source_connection)
     diagnostics: List[Dict[str, Any]] = []
 
-    # Extract bearer token for Fabric API access
-    authorization = http_request.headers.get("authorization")
-    fabric_bearer_token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        fabric_bearer_token = authorization.split(" ", 1)[1].strip()
-
     diagnostics.append({
         "mode": "metadata_resolution",
         "status": "success" if source_connection.get("workspace_id") or source_connection.get("artifact_id") else "partial",
@@ -554,23 +554,62 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
             "diagnostics": diagnostics,
         })
 
-    if not fabric_bearer_token:
-        raise HTTPException(status_code=401, detail={
-            "error": "Fabric bearer token required",
-            "details": "Authorization header with a valid Fabric bearer token is required for Spark preview.",
-            "diagnostics": diagnostics,
-        })
+    # Extract bearer token for notebook-based fallback
+    authorization = http_request.headers.get("authorization")
+    bearer_token: Optional[str] = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
 
     try:
-        preview_service = FabricSparkPreviewService(fabric_bearer_token)
-        result = await preview_service.execute_preview(source_connection)
+        # ── Attempt 1: DirectSparkPreviewService (in-process Spark, only available
+        #               inside Fabric / Databricks environments)
+        direct_service = DirectSparkPreviewService()
+        result = await direct_service.execute_preview(source_connection)
+
+        # Check whether the service returned a Spark-unavailable error rather than
+        # raising, and fall back to the notebook-based approach in that case.
+        spark_unavailable = (
+            result.get("error")
+            and "spark not available" in str(result.get("error", "")).lower()
+        )
+
+        if spark_unavailable:
+            logger.info(
+                "DirectSparkPreviewService: Spark not available locally — "
+                "falling back to FabricSparkPreviewService (notebook-based). "
+                "workspace_id=%s artifact_id=%s",
+                source_connection.get("workspace_id"),
+                source_connection.get("artifact_id"),
+            )
+
+            if not bearer_token:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": "Preview execution failed: Spark not available in this environment and no bearer token was provided for notebook-based fallback.",
+                        "diagnostics": diagnostics,
+                        "schema_discovery": {
+                            "columns": [],
+                            "sample_rows": [],
+                            "nullable_columns": [],
+                            "primary_key_candidates": [],
+                            "timestamp_columns": [],
+                        },
+                        "source_name": _runtime_dataset_name(source_connection),
+                    },
+                )
+
+            # ── Attempt 2: FabricSparkPreviewService (notebook-based, remote Spark)
+            notebook_service = FabricSparkPreviewService(bearer_token)
+            result = await notebook_service.execute_preview(source_connection)
 
         result["source_name"] = _runtime_dataset_name(source_connection)
         result.setdefault("diagnostics", []).extend(diagnostics)
 
         schema_discovery = result.get("schema_discovery", {})
         logger.info(
-            "Spark Preview Success | workspace_id=%s artifact_id=%s resolved_path=%s columns=%s sample_rows=%s",
+            "Preview Success | mode=%s workspace_id=%s artifact_id=%s resolved_path=%s columns=%s sample_rows=%s",
+            result.get("preview_mode", "unknown"),
             source_connection.get("workspace_id"),
             source_connection.get("artifact_id"),
             source_connection.get("resolved_path"),
@@ -582,12 +621,50 @@ async def preview_runtime_source(request: RuntimeSourcePreviewRequest, http_requ
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Spark preview failed: %s", exc, exc_info=True)
+        logger.error("Runtime source preview failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail={
-            "error": "Spark preview extraction failed",
+            "error": "Preview execution failed",
             "details": str(exc),
             "diagnostics": diagnostics,
         })
+
+
+@router.post("/fabric-runtime-source-query")
+async def execute_preview_query(request: PreviewQueryRequest, http_request: Request):
+    """Execute a dynamic SQL query against a preview session staging table."""
+    # Extract bearer token
+    authorization = http_request.headers.get("authorization")
+    bearer_token: Optional[str] = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+    
+    if not bearer_token:
+        raise HTTPException(status_code=401, detail="Authentication required for preview query.")
+
+    from services.fabric.universal_preview_service import _PREVIEW_SESSION_STORE
+    
+    session = _PREVIEW_SESSION_STORE.get(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Preview session {request.session_id} not found or expired.")
+    
+    workspace_id = session["workspace_id"]
+    artifact_id = session["artifact_id"]
+    
+    sql_to_run = request.query or request.sql_query
+    if not sql_to_run:
+        raise HTTPException(status_code=400, detail="SQL query is required.")
+
+    notebook_service = FabricSparkPreviewService(bearer_token)
+    try:
+        result = await notebook_service.execute_sql_query(
+            workspace_id=workspace_id,
+            lakehouse_id=artifact_id,
+            sql_query=sql_to_run
+        )
+        return result
+    except Exception as exc:
+        logger.error("Preview query failed: %s", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/fabric-runtime-source-save")

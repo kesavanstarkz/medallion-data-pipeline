@@ -1,0 +1,252 @@
+/* Dynamic Preview Styling */
+.dynamic-preview-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.preview-sql-panel {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 1.25rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.panel-header .title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #1e293b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.panel-header .stats {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+}
+
+.sql-editor-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 0.5rem;
+  background: #f8fafc;
+}
+
+.sql-textarea {
+  width: 100%;
+  min-height: 80px;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.sql-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.5rem;
+}
+
+.execute-btn {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+}
+
+.execute-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+}
+
+.execute-btn.loading {
+  opacity: 0.8;
+  cursor: not-allowed;
+}
+
+.icon-btn {
+  background: white;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  color: #2563eb;
+  border-color: #3b82f6;
+}
+
+/* Table Section */
+.preview-content-panel {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  overflow: hidden;
+  min-height: 300px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+}
+
+.table-responsive-container {
+  width: 100%;
+  max-height: 500px;
+  overflow: auto;
+  position: relative;
+}
+
+.dynamic-data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.85rem;
+}
+
+.dynamic-data-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.dynamic-data-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  text-align: left;
+  padding: 0.75rem 1rem;
+  border-bottom: 2px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.dynamic-data-table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #f1f5f9;
+  color: #1e293b;
+  white-space: nowrap;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dynamic-data-table tr:hover td {
+  background: #f1f5f9;
+}
+
+.row-number-col {
+  width: 40px;
+  text-align: center !important;
+  color: #94a3b8 !important;
+  font-size: 0.7rem;
+  border-right: 1px solid #f1f5f9;
+  background: #fafafa !important;
+  position: sticky;
+  left: 0;
+  z-index: 5;
+}
+
+.null-val {
+  color: #cbd5e1;
+  font-style: italic;
+  font-size: 0.75rem;
+}
+
+/* Placeholders & Alerts */
+.preview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  color: #94a3b8;
+  gap: 1rem;
+}
+
+.preview-placeholder p {
+  font-weight: 600;
+}
+
+.sql-error-alert {
+  background: #fef2f2;
+  border: 1px solid #fee2e2;
+  color: #b91c1c;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.loader-ring {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #f1f5f9;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.json-view {
+  padding: 1.5rem;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
