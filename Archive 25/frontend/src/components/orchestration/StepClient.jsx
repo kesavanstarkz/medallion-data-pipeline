@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder } from 'react-icons/fi';
+import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder, FiDatabase, FiServer, FiCpu, FiHardDrive, FiShare2, FiShield, FiInfo, FiChevronRight, FiEdit2 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import FluentSelect from '../FluentSelect';
@@ -11,12 +11,51 @@ const itemVariants = {
   animate: { opacity: 1, y: 0 }
 };
 
-export default function StepClient({ clients, clientLoading, selectedClient, setSelectedClient, fetchClients, onNext, call, toast, sourceForm, setSourceForm, registerSource, savingSource, testConnection, testingConnection, connectionVerified, setConnectionVerified, testResult, extractedFabricData, setExtractedFabricData, onDeploySuccess }) {
+export default function StepClient({ 
+  clients, clientLoading, selectedClient, setSelectedClient, fetchClients, onNext, call, toast, 
+  sourceForm, setSourceForm, registerSource, savingSource, testConnection, testingConnection, 
+  connectionVerified, setConnectionVerified, testResult, extractedFabricData, setExtractedFabricData, 
+  onDeploySuccess, targets, setTargets, selectedTarget, setSelectedTarget, fetchTargets 
+}) {
   const navigate = useNavigate();
-  const [tab, setTab] = useState('existing'); // 'existing' | 'register'
+  const [tab, setTab] = useState('existing'); // 'existing' | 'register' | 'target'
   const [searchQuery, setSearchQuery] = useState('');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [clientToDelete, setClientToDelete] = useState(null);
+
+  // Target Setup State
+  const [targetType, setTargetType] = useState('None');
+  const [targetFields, setTargetFields] = useState({});
+  const [testingTarget, setTestingTarget] = useState(false);
+  const [registeringTarget, setRegisteringTarget] = useState(false);
+  const [targetTestResult, setTargetTestResult] = useState(null);
+  const [showDeleteTargetConfirm, setShowDeleteTargetConfirm] = useState(false);
+  const [targetToDelete, setTargetToDelete] = useState(null);
+
+  const TARGET_TYPES = [
+    "None", "Fabric Warehouse", "SQL Server", "PostgreSQL", "MySQL", "Snowflake", 
+    "Redshift", "BigQuery", "Azure Synapse", "MongoDB", "Cosmos DB", "AWS S3", 
+    "Azure ADLS", "OneLake", "Parquet", "CSV", "JSON"
+  ];
+
+  const TARGET_FIELD_MAP = {
+    "Fabric Warehouse": ["Workspace ID", "Warehouse ID", "SQL Endpoint", "Database Name", "Username", "Password / Token", "Schema", "Table", "Write Mode"],
+    "SQL Server": ["Host", "Port", "Database", "Username", "Password", "Schema", "Table", "Encrypt Toggle", "Write Mode"],
+    "PostgreSQL": ["Host", "Port", "Database", "Username", "Password", "Schema", "Table", "SSL Mode", "Write Mode"],
+    "MySQL": ["Host", "Port", "Database", "Username", "Password", "Table", "Charset", "SSL", "Write Mode"],
+    "Snowflake": ["Account", "Username", "Password", "Warehouse", "Database", "Schema", "Role", "Table", "Write Mode"],
+    "Redshift": ["Cluster Endpoint", "Port", "Database", "Username", "Password", "Schema", "Table", "SSL", "Write Mode"],
+    "BigQuery": ["Project ID", "Dataset", "Table", "Service Account JSON Upload", "Location", "Write Mode"],
+    "Azure Synapse": ["Server", "Database", "Username", "Password", "Schema", "Table", "Auth Type", "Write Mode"],
+    "MongoDB": ["Connection URI", "Database", "Collection", "Auth Database", "Write Mode"],
+    "Cosmos DB": ["Endpoint URL", "Primary Key", "Database", "Container", "API Type", "Write Mode"],
+    "AWS S3": ["Bucket", "Folder Path", "Region", "Access Key", "Secret Key", "File Format", "Compression", "Partition Strategy"],
+    "Azure ADLS": ["Storage Account", "Container", "Folder Path", "Account Key / SAS", "File Format", "Compression"],
+    "OneLake": ["Workspace ID", "Lakehouse", "Folder Path", "Access Token", "File Format", "Write Mode"],
+    "Parquet": ["Output Path", "Partition Strategy", "Compression"],
+    "CSV": ["Output Path", "Delimiter", "Encoding", "Header Toggle"],
+    "JSON": ["Output Path", "JSON Mode", "Encoding", "Pretty Print Toggle"]
+  };
 
 
   const filteredClients = (clients || []).filter(c =>
@@ -28,6 +67,7 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
   const handleSelectClient = (c) => {
     setSelectedClient(c);
     localStorage.setItem('client_name', c);
+    fetchTargets(c);
   };
 
   const deleteClient = (e, c) => {
@@ -49,6 +89,77 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
       fetchClients();
     } catch (err) {
       toast(`Deletion failed: ${err.message}`, 'error');
+    }
+  };
+
+  const handleTestTarget = async () => {
+    if (!selectedClient) return;
+    setTestingTarget(true);
+    setTargetTestResult(null);
+    try {
+      const res = await call('/config/targets/test', 'POST', {
+        client_name: selectedClient,
+        target_type: targetType,
+        target_name: targetFields["target_name"] || `${selectedClient}_${targetType.replace(/\s/g, '_')}`,
+        credential_config: targetFields
+      });
+      setTargetTestResult({ type: res.status === 'SUCCESS' ? 'success' : 'error', message: res.message });
+      if (res.status === 'SUCCESS') toast('Target connection verified', 'success');
+    } catch (err) {
+      setTargetTestResult({ type: 'error', message: err.message });
+      toast('Test failed: ' + err.message, 'error');
+    } finally {
+      setTestingTarget(false);
+    }
+  };
+
+  const handleRegisterTarget = async () => {
+    if (!selectedClient) return;
+    setRegisteringTarget(true);
+    try {
+      const name = targetFields["target_name"] || `${selectedClient}_${targetType.replace(/\s/g, '_')}`;
+      await call('/config/targets', 'POST', {
+        client_name: selectedClient,
+        target_type: targetType,
+        target_name: name,
+        credential_config: targetFields
+      });
+      toast(`Target "${name}" registered successfully`, 'success');
+      fetchTargets(selectedClient);
+      setTab('existing');
+    } catch (err) {
+      toast('Registration failed: ' + err.message, 'error');
+    } finally {
+      setRegisteringTarget(false);
+    }
+  };
+
+  const handleEditTarget = (t) => {
+    setTargetType(t.target_type);
+    setTargetFields({ ...t.credential_config, target_name: t.target_name });
+    setSelectedTarget(t);
+    setTab('target');
+  };
+
+  const handleDeleteTarget = (e, t) => {
+    e.stopPropagation();
+    setTargetToDelete(t);
+    setShowDeleteTargetConfirm(true);
+  };
+
+  const handleConfirmDeleteTarget = async () => {
+    if (!targetToDelete) return;
+    try {
+      await call(`/config/targets/${targetToDelete.target_id}`, 'DELETE');
+      toast('Target deleted successfully', 'success');
+      fetchTargets(selectedClient);
+      if (selectedTarget?.target_id === targetToDelete.target_id) {
+        setSelectedTarget(null);
+      }
+      setShowDeleteTargetConfirm(false);
+      setTargetToDelete(null);
+    } catch (err) {
+      toast('Deletion failed: ' + err.message, 'error');
     }
   };
 
@@ -81,7 +192,20 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
               onClick={() => setTab('register')}
               style={{ padding: '8px 20px' }}
             >
-              <FiPlus style={{ marginRight: 6 }} /> Register New
+              <FiPlus style={{ marginRight: 6 }} /> Register Client
+            </button>
+            <button
+              className={`step-tab ${tab === 'target' ? 'active' : ''}`}
+              onClick={() => {
+                if (!selectedClient) {
+                  toast('Please select or register a client before configuring a target.', 'warning');
+                  return;
+                }
+                setTab('target');
+              }}
+              style={{ padding: '8px 20px' }}
+            >
+              <FiShare2 style={{ marginRight: 6 }} /> Targets
             </button>
           </div>
 
@@ -111,7 +235,6 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
             </button>
           </div>
 
-          {/* Client Grid */}
           <div className="client-grid">
             {clientLoading ? (
               Array.from({ length: 8 }).map((_, i) => (
@@ -166,6 +289,66 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
               ))
             )}
           </div>
+
+          {/* Registered Targets for Selected Client */}
+          {selectedClient && (
+            <div className="registered-targets-section" style={{ marginTop: 32 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h4 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <FiShare2 size={14} /> Registered Targets for {selectedClient}
+                </h4>
+                <button 
+                  className="orch-btn ghost tiny" 
+                  onClick={() => { setTargetType('None'); setTargetFields({}); setTab('target'); }}
+                  style={{ fontSize: 11 }}
+                >
+                  <FiPlus style={{ marginRight: 4 }} /> New Target
+                </button>
+              </div>
+              
+              <div className="target-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+                {(targets || []).map(t => (
+                  <div 
+                    key={t.target_id} 
+                    className={`target-card ${selectedTarget?.target_id === t.target_id ? 'selected' : ''}`}
+                    onClick={() => setSelectedTarget(t)}
+                    style={{
+                      padding: '12px 16px',
+                      background: '#fff',
+                      border: '1px solid var(--border)',
+                      borderRadius: 12,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      position: 'relative',
+                      transition: 'all 0.2s ease',
+                      border: selectedTarget?.target_id === t.target_id ? '2px solid var(--blue)' : '1px solid var(--border)'
+                    }}
+                  >
+                    <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--blue-bg)', color: 'var(--blue)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <FiDatabase size={16} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.target_name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{t.target_type}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button className="orch-btn ghost tiny" onClick={(e) => { e.stopPropagation(); handleEditTarget(t); }} style={{ padding: 4 }}><FiEdit2 size={12} /></button>
+                      <button className="orch-btn ghost tiny" onClick={(e) => handleDeleteTarget(e, t)} style={{ padding: 4, color: 'var(--red)' }}><FiTrash2 size={12} /></button>
+                    </div>
+                  </div>
+                ))}
+                {(!targets || targets.length === 0) && (
+                  <div style={{ gridColumn: '1/-1', padding: '16px', textAlign: 'center', color: 'var(--text3)', fontSize: 12, background: 'var(--surface2)', borderRadius: 12, border: '1px dashed var(--border)' }}>
+                    No targets configured for this client.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Footer Actions - Selected Client Only */}
 
           {/* Footer Actions - Selected Client Only */}
           <AnimatePresence>
@@ -527,6 +710,146 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
         </div>
       )}
 
+      {tab === 'target' && (
+        <div className="step-body">
+          <div className="target-setup-header" style={{ marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              <div style={{ padding: '2px 10px', background: 'var(--blue-bg)', color: 'var(--blue)', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                Selected Client: {selectedClient}
+              </div>
+            </div>
+            <h3 style={{ margin: 0, fontSize: 20, fontWeight: 900 }}>DEA Agent — Target Setup</h3>
+            <p style={{ margin: '4px 0 0', opacity: 0.7, fontSize: 13 }}>Configure destination systems for the selected client.</p>
+          </div>
+
+          <div className="target-form-container" style={{ background: 'var(--surface2)', borderRadius: 20, padding: 24, border: '1px solid var(--border)' }}>
+            <div className="register-field full" style={{ marginBottom: 24 }}>
+              <label>SELECT TARGET TYPE</label>
+              <FluentSelect
+                value={targetType}
+                onChange={(e) => {
+                  setTargetType(e.target.value);
+                  setTargetFields({});
+                  setTargetTestResult(null);
+                }}
+                options={TARGET_TYPES.map(t => ({ value: t, label: t }))}
+              />
+            </div>
+
+            {targetType === 'None' ? (
+              <div style={{ padding: '20px', background: 'var(--blue-bg)', borderRadius: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+                <FiInfo size={20} color="var(--blue)" />
+                <div style={{ fontSize: 14, color: 'var(--blue)', fontWeight: 600 }}>
+                  No target configured. Intelligence will continue using source-only context.
+                </div>
+              </div>
+            ) : (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="target-dynamic-fields">
+                <div className="register-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                  <div className="register-field full">
+                    <label>Target Name</label>
+                    <input 
+                      value={targetFields["target_name"] || ''} 
+                      onChange={(e) => setTargetFields({...targetFields, target_name: e.target.value})}
+                      placeholder="e.g. Fabric_Warehouse_Gold"
+                    />
+                  </div>
+                  {TARGET_FIELD_MAP[targetType].map(field => (
+                    <div key={field} className={`register-field ${["SQL Endpoint", "Connection URI", "Endpoint URL", "Service Account JSON Upload", "Folder Path", "Output Path"].includes(field) ? 'full' : ''}`}>
+                      <label>{field}</label>
+                      {field === 'Write Mode' ? (
+                        <FluentSelect 
+                          value={targetFields[field] || 'Append'}
+                          onChange={(e) => setTargetFields({...targetFields, [field]: e.target.value})}
+                          options={[
+                            { value: 'Append', label: 'Append' },
+                            { value: 'Overwrite', label: 'Overwrite' },
+                            { value: 'Upsert', label: 'Upsert' }
+                          ]}
+                        />
+                      ) : field === 'Auth Type' || field === 'API Type' || field === 'SSL Mode' || field === 'File Format' || field === 'Compression' ? (
+                        <input 
+                          value={targetFields[field] || ''} 
+                          onChange={(e) => setTargetFields({...targetFields, [field]: e.target.value})}
+                          placeholder={`Enter ${field}...`}
+                        />
+                      ) : field === 'Encrypt Toggle' || field === 'Header Toggle' || field === 'Pretty Print Toggle' || field === 'SSL' ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 44 }}>
+                          <input 
+                            type="checkbox" 
+                            checked={!!targetFields[field]} 
+                            onChange={(e) => setTargetFields({...targetFields, [field]: e.target.checked})}
+                            style={{ width: 20, height: 20 }}
+                          />
+                          <span style={{ fontSize: 13, fontWeight: 500 }}>Enabled</span>
+                        </div>
+                      ) : (
+                        <input 
+                          type={field.includes('Password') || field.includes('Key') || field.includes('Token') ? 'password' : 'text'}
+                          value={targetFields[field] || ''} 
+                          onChange={(e) => setTargetFields({...targetFields, [field]: e.target.value})}
+                          placeholder={field}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+
+            {targetTestResult && (
+              <div style={{
+                marginTop: 20,
+                padding: '14px 20px',
+                borderRadius: 14,
+                fontSize: 13,
+                fontWeight: 600,
+                border: '1px solid',
+                background: targetTestResult.type === 'success' ? 'var(--green-bg)' : 'var(--red-bg)',
+                borderColor: targetTestResult.type === 'success' ? 'var(--green-bdr)' : 'var(--red-bdr)',
+                color: targetTestResult.type === 'success' ? 'var(--green)' : 'var(--red)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12
+              }}>
+                <div style={{ fontSize: 20 }}>{targetTestResult.type === 'success' ? '✅' : '❌'}</div>
+                <div>{targetTestResult.message}</div>
+              </div>
+            )}
+
+            <div className="target-actions" style={{ marginTop: 32, display: 'flex', gap: 12 }}>
+              {targetType !== 'None' && (
+                <>
+                  <button 
+                    className="orch-btn ghost" 
+                    onClick={handleTestTarget}
+                    disabled={testingTarget}
+                    style={{ flex: 1, height: 48 }}
+                  >
+                    {testingTarget ? 'Testing...' : '⚡ Test Connection'}
+                  </button>
+                  <button 
+                    className="orch-btn secondary" 
+                    onClick={handleRegisterTarget}
+                    disabled={registeringTarget}
+                    style={{ flex: 1, height: 48 }}
+                  >
+                    {registeringTarget ? 'Registering...' : '💾 Register Target'}
+                  </button>
+                </>
+              )}
+              <button 
+                className="orch-btn primary premium-btn" 
+                onClick={onNext}
+                style={{ flex: 2, height: 48 }}
+              >
+                Continue to Intelligence →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Portal Confirmation Modal */}
       {showDeleteConfirm && createPortal(
         <div className="mode-modal-overlay" style={{ zIndex: 1200 }}>
@@ -574,6 +897,46 @@ export default function StepClient({ clients, clientLoading, selectedClient, set
               >
                 <FiTrash2 style={{ marginRight: 8 }} /> Delete Client
               </button>
+            </div>
+          </motion.div>
+        </div>,
+        document.body
+      )}
+
+      {/* Delete Target Confirmation Modal */}
+      {showDeleteTargetConfirm && createPortal(
+        <div className="mode-modal-overlay" style={{ zIndex: 1200 }}>
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="mode-modal-card"
+            style={{ width: 440, padding: 0, overflow: 'hidden' }}
+          >
+            <div className="confirmation-header" style={{ padding: '24px 32px 16px', background: 'var(--surface2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <FiAlertTriangle size={20} />
+                </div>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>Delete Target</h3>
+              </div>
+              <button
+                className="orch-btn ghost tiny"
+                onClick={() => setShowDeleteTargetConfirm(false)}
+                style={{ borderRadius: '50%', width: 32, height: 32, padding: 0 }}
+              >
+                <FiX />
+              </button>
+            </div>
+
+            <div className="confirmation-body" style={{ padding: '24px 32px' }}>
+              <p style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Are you sure you want to delete target <strong>"{targetToDelete?.target_name}"</strong>?</p>
+              <p style={{ marginTop: 12, fontSize: 13, color: 'var(--text3)' }}>This action cannot be undone.</p>
+            </div>
+
+            <div className="confirmation-footer" style={{ padding: '20px 32px', background: 'var(--surface2)', display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+              <button className="orch-btn ghost" onClick={() => setShowDeleteTargetConfirm(false)}>Cancel</button>
+              <button className="orch-btn primary" onClick={handleConfirmDeleteTarget} style={{ background: '#ef4444', border: 'none' }}>Delete Target</button>
             </div>
           </motion.div>
         </div>,

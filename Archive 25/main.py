@@ -15,6 +15,7 @@ from api.s3_injest import router as s3_router
 from api.discovery import router as discovery_router
 from api.auth import router as auth_router
 from api.api_fabric import router as fabric_router
+from api.target import router as target_router
 from core.logger import setup_logger
 from dotenv import load_dotenv
 from pathlib import Path
@@ -75,6 +76,7 @@ app.include_router(storage_router)     # Storage Explorer
 app.include_router(discovery_router)   # Pipeline Intelligence
 app.include_router(auth_router)        # Microsoft SSO
 app.include_router(fabric_router)      # Microsoft Fabric Extraction
+app.include_router(target_router)      # Target Configuration
 
 # Serve React build (if present) as a single-page app. We check a few
 # common locations and mount the first existing build directory at '/'.
@@ -144,6 +146,7 @@ from models.master_config_authoritative import MasterConfigAuthoritative
 from models.dq_schema_config import DQSchemaConfig
 from models.api_source_config import APISourceConfig
 from models.metadata import IngestionMetadata, ConfigurationMetadata, PipelineRunHistory
+from models.target import Client, Target
 
 # Create tables
 Base.metadata.create_all(bind=engine)

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { FiDatabase, FiPlay, FiSearch, FiAlertCircle, FiTerminal, FiLayout, FiMaximize2, FiDownload } from 'react-icons/fi';
+import { FiDatabase, FiPlay, FiSearch, FiAlertCircle, FiTerminal, FiLayout, FiDownload, FiChevronDown, FiTable, FiColumns } from 'react-icons/fi';
+import { apiUrl } from '../hooks/useApi';
 import './DynamicPreview.css';
 
 const DynamicPreviewTable = ({ 
@@ -8,7 +9,8 @@ const DynamicPreviewTable = ({
   onClose,
   clientId,
   workspaceId,
-  lakehouseId 
+  lakehouseId,
+  onDataChange
 }) => {
   const [session, setSession] = useState(initialData?.session_id);
   const [columns, setColumns] = useState(initialData?.columns || []);
@@ -21,6 +23,8 @@ const DynamicPreviewTable = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [viewMode, setViewMode] = useState('table'); // 'table' or 'json'
+  const [metadata, setMetadata] = useState({ tables: [], columns: [], active_table: "" });
+  const [showMetadata, setShowMetadata] = useState(false);
 
   // Sync with initial data updates
   useEffect(() => {
@@ -31,8 +35,29 @@ const DynamicPreviewTable = ({
       if (!sqlQuery && initialData.session_id) {
         setSqlQuery(`SELECT * FROM runtime_preview_${initialData.session_id.replace(/-/g, '_')} LIMIT 100`);
       }
+      // Fetch metadata when session changes
+      if (initialData.session_id) {
+        fetchMetadata(initialData.session_id);
+      }
     }
   }, [initialData]);
+
+  const fetchMetadata = async (sessionId) => {
+    try {
+      const token = sessionStorage.getItem('fabric_access_token');
+      const response = await fetch(apiUrl(`/discovery/fabric-runtime-metadata-discovery?session_id=${sessionId}`), {
+        headers: { 
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setMetadata(data);
+      }
+    } catch (err) {
+      console.error("Metadata discovery failed", err);
+    }
+  };
 
   const handleExecuteQuery = async () => {
     if (!sqlQuery.trim() || !session) return;
@@ -42,9 +67,13 @@ const DynamicPreviewTable = ({
     console.log("Executing dynamic SQL query:", sqlQuery);
 
     try {
-      const response = await fetch('/discovery/fabric-runtime-source-query', {
+      const token = sessionStorage.getItem('fabric_access_token');
+      const response = await fetch(apiUrl('/discovery/fabric-runtime-source-query'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           session_id: session,
           workspace_id: workspaceId,
@@ -60,14 +89,32 @@ const DynamicPreviewTable = ({
         throw new Error(result.detail || 'SQL Execution failed');
       }
 
-      // Dynamic Extraction Logic
-      const newColumns = result.columns || (result.rows?.length ? Object.keys(result.rows[0]) : []);
+      const newColumnsRaw = result.columns || (result.rows?.length ? Object.keys(result.rows[0]) : []);
       const newRows = result.rows || [];
+
+      // Normalize columns to objects if they are strings
+      const newColumns = newColumnsRaw.map(col => {
+        if (typeof col === 'string') return { name: col, type: 'string' };
+        return {
+          name: col.name || col.column_name || col.displayName || String(col),
+          type: col.type || col.data_type || 'string'
+        };
+      });
 
       console.log("Dynamic columns extracted:", newColumns);
       
       setColumns(newColumns);
       setRows(newRows);
+
+      if (onDataChange) {
+        onDataChange({
+          ...initialData,
+          rows: newRows,
+          columns: newColumns,
+          row_count: newRows.length,
+          preview_mode: 'queried'
+        });
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -94,13 +141,44 @@ const DynamicPreviewTable = ({
       {/* SQL Header Section */}
       <div className="preview-sql-panel">
         <div className="panel-header">
-          <div className="title">
-            <FiTerminal /> SQL QUERY EDITOR
+          <div className="title" onClick={() => setShowMetadata(!showMetadata)} style={{ cursor: 'pointer' }}>
+            <FiTerminal /> SQL QUERY EDITOR {showMetadata ? <FiChevronDown /> : <FiSearch />}
           </div>
           <div className="stats">
             {rows.length} rows • {columns.length} columns
           </div>
         </div>
+
+        {showMetadata && (
+          <div className="metadata-explorer" style={{ padding: '10px 15px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 20 }}>
+            <div className="meta-group">
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <FiTable size={12}/> TABLES
+              </div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                {metadata.tables.map(t => (
+                  <span key={t} className={`pi-tag ${t === metadata.active_table ? 'active' : 'inactive'}`} 
+                        onClick={() => setSqlQuery(`SELECT * FROM ${t} LIMIT 100`)}
+                        style={{ cursor: 'pointer', fontSize: 10 }}>
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="meta-group">
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <FiColumns size={12}/> COLUMNS ({metadata.active_table})
+              </div>
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', maxHeight: 60, overflowY: 'auto' }}>
+                {metadata.columns.map(c => (
+                  <span key={c.column_name} className="pi-tag inactive" style={{ fontSize: 10 }}>
+                    {c.column_name} <small style={{ opacity: 0.6 }}>{c.data_type}</small>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
         
         <div className="sql-editor-container">
           <textarea
@@ -150,22 +228,26 @@ const DynamicPreviewTable = ({
                 <thead>
                   <tr>
                     <th className="row-number-col">#</th>
-                    {columns.map((column) => (
-                      <th key={column} title={column}>{column}</th>
-                    ))}
+                    {columns.map((col, idx) => {
+                      const colName = typeof col === 'string' ? col : (col.name || col.column_name || col.displayName);
+                      return <th key={idx} title={colName}>{colName}</th>;
+                    })}
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((row, rowIndex) => (
                     <tr key={rowIndex}>
                       <td className="row-number-col">{rowIndex + 1}</td>
-                      {columns.map((column) => (
-                        <td key={`${rowIndex}-${column}`}>
-                          {row[column] !== null && row[column] !== undefined
-                            ? String(row[column])
-                            : <span className="null-val">null</span>}
-                        </td>
-                      ))}
+                      {columns.map((col, colIdx) => {
+                        const colName = typeof col === 'string' ? col : (col.name || col.column_name || col.displayName);
+                        return (
+                          <td key={`${rowIndex}-${colIdx}`}>
+                            {row[colName] !== null && row[colName] !== undefined
+                              ? String(row[colName])
+                              : <span className="null-val">null</span>}
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>

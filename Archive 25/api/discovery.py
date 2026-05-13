@@ -661,9 +661,64 @@ async def execute_preview_query(request: PreviewQueryRequest, http_request: Requ
             lakehouse_id=artifact_id,
             sql_query=sql_to_run
         )
+        # Normalize result for UI
+        if "rows" in result and isinstance(result["rows"], list):
+            result["row_count"] = len(result["rows"])
+        if "columns" in result and isinstance(result["columns"], list):
+            result["column_count"] = len(result["columns"])
+            
         return result
     except Exception as exc:
         logger.error("Preview query failed: %s", str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/fabric-runtime-metadata-discovery")
+async def discover_runtime_metadata(session_id: str, http_request: Request):
+    """Fetch schema, table, and column metadata for the staging database."""
+    authorization = http_request.headers.get("authorization")
+    bearer_token: Optional[str] = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+    
+    if not bearer_token:
+        raise HTTPException(status_code=401, detail="Authentication required for metadata discovery.")
+
+    from services.fabric.universal_preview_service import _PREVIEW_SESSION_STORE
+    
+    session = _PREVIEW_SESSION_STORE.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Preview session {session_id} not found or expired.")
+    
+    notebook_service = FabricSparkPreviewService(bearer_token)
+    try:
+        # Discover all tables in the staging DB (Neon Postgres)
+        # We look for tables starting with our prefix or the current staging table
+        tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        tables_res = await notebook_service.execute_sql_query(
+            workspace_id=session["workspace_id"],
+            lakehouse_id=session["artifact_id"],
+            sql_query=tables_query
+        )
+        tables = [row["table_name"] for row in tables_res.get("rows", [])]
+        
+        # Discover columns for the primary staging table
+        staging_table = session["staging_table"]
+        columns_query = f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{staging_table}'"
+        columns_res = await notebook_service.execute_sql_query(
+            workspace_id=session["workspace_id"],
+            lakehouse_id=session["artifact_id"],
+            sql_query=columns_query
+        )
+        columns = columns_res.get("rows", [])
+        
+        return {
+            "tables": tables,
+            "columns": columns,
+            "active_table": staging_table
+        }
+    except Exception as exc:
+        logger.error("Metadata discovery failed: %s", str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
 

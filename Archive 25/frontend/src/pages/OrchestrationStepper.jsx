@@ -1,8 +1,8 @@
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useApi, apiUrl } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import { FiX, FiCheck, FiZap, FiEdit2, FiRefreshCw, FiBarChart2, FiClipboard, FiSearch, FiSettings, FiActivity, FiFolder, FiFileText, FiEye, FiDownload, FiCornerUpLeft, FiHome, FiClock } from 'react-icons/fi';
+import { FiX, FiCheck, FiZap, FiEdit2, FiBarChart2, FiClipboard, FiSearch, FiSettings, FiActivity, FiFolder, FiFileText, FiDownload, FiCornerUpLeft, FiClock } from 'react-icons/fi';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation, useNavigate } from 'react-router-dom';
 import FluentSelect from '../components/FluentSelect';
@@ -17,7 +17,6 @@ import StepDeployment from '../components/orchestration/StepDeployment';
 import PipelineIntelligence from '../components/PipelineIntelligence';
 import HistoryView from './HistoryView';
 import './orchestration.css';
-import logo from "../assets/images/image.png"
 
 const STEPS = [
   { num: 0, label: 'Platform' },
@@ -41,7 +40,8 @@ function parseStrictJson(text) {
 export default function OrchestrationStepper({ hideHeader = false }) {
   const toast = useToast();
   const nav = useNavigate();
-  const { call, loading } = useApi();
+  const location = useLocation();
+  const { call } = useApi();
   const [step, setStep] = useState(0);
   const [selectedPlatform, setSelectedPlatform] = useState(localStorage.getItem('selected_platform') || '');
   const [clients, setClients] = useState([]);
@@ -89,6 +89,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [selectedPipeline, setSelectedPipeline] = useState(null);
   const [fabricAccessToken, setFabricAccessToken] = useState(null);
   const [masterConfig, setMasterConfig] = useState(null);
+  const [targets, setTargets] = useState([]);
+  const [selectedTarget, setSelectedTarget] = useState(null);
   const selectedWorkspaceRef = useRef(null);
 
   // Source form state
@@ -128,7 +130,20 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     exit: { opacity: 0, scale: 0.95, transition: { duration: 0.2 } }
   };
 
-  function resetSessionState({ clearSourceSelection = false } = {}) {
+  const fetchTargets = useCallback(async (client) => {
+    if (!client) {
+      setTargets([]);
+      return;
+    }
+    try {
+      const res = await call(`/config/targets/${encodeURIComponent(client)}`);
+      setTargets(res || []);
+    } catch (e) {
+      console.warn('Failed to fetch targets:', e);
+    }
+  }, [call]);
+
+  const resetSessionState = useCallback(({ clearSourceSelection = false } = {}) => {
     console.log("STEPPER: Resetting session state", { clearSourceSelection });
     setIntelligenceData(null);
     setConfigPersisted(false);
@@ -154,9 +169,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       setS3Sources([]);
       setAdlsSources([]);
     }
-  }
+    fetchTargets(selectedClient);
+  }, [selectedClient, fetchTargets]);
 
-  function resetWorkspaceScopedState() {
+  const resetWorkspaceScopedState = useCallback(() => {
     setIntelligenceData(null);
     setConfigPersisted(false);
     setDatasets([]);
@@ -165,14 +181,13 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setEditingConfigColumns([]);
     setSelectedDqDataset(null);
     setDqError(null);
-    setSelectedSources([]);
     setPipelineDeployed(false);
     setDeploymentStrategy(null);
     setDeploymentPackage(null);
     setExtractedFabricData(null);
-  }
+  }, []);
 
-  function handleWorkspaceSelection(workspace) {
+  const handleWorkspaceSelection = (workspace) => {
     const previousWorkspaceId = selectedWorkspaceRef.current?.id || null;
     const nextWorkspaceId = workspace?.id || null;
     console.log('STEPPER: Workspace selection change', {
@@ -187,7 +202,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       setSelectedPipeline(null);
       resetWorkspaceScopedState();
     }
-  }
+  };
 
   function handlePipelineSelection(pipeline) {
     const previousPipelineId = selectedPipeline?.id || null;
@@ -200,69 +215,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setSelectedPipeline(pipeline || null);
   }
 
-  // Persist Fabric token to sessionStorage whenever it changes
-  useEffect(() => {
-    if (fabricAccessToken) {
-      console.log("STEPPER: Persisting Fabric token to sessionStorage");
-      sessionStorage.setItem('fabric_access_token', fabricAccessToken);
-    }
-  }, [fabricAccessToken]);
-
-  // Restore Fabric token on mount
-  useEffect(() => {
-    const restoreToken = async () => {
-      const storedToken = sessionStorage.getItem('fabric_access_token');
-      if (storedToken) {
-        console.log("STEPPER: Restored Fabric token from sessionStorage");
-        setFabricAccessToken(storedToken);
-      } else {
-        // Try fetching from backend session
-        try {
-          console.log("STEPPER: Attempting to fetch Fabric token from backend");
-          const res = await call('/auth/fabric/token');
-          if (res && res.accessToken) {
-            console.log("STEPPER: Fetched Fabric token from backend");
-            setFabricAccessToken(res.accessToken);
-            sessionStorage.setItem('fabric_access_token', res.accessToken);
-          }
-        } catch (e) {
-          console.warn("STEPPER: Failed to fetch token from backend", e);
-        }
-      }
-    };
-    restoreToken();
-  }, []);
-
-  // ----- API FUNCTIONS -----
-  useEffect(() => { fetchClients(); }, []);
-
-  const location = useLocation();
-  useEffect(() => {
-    try {
-      const manageFlag = location?.state?.manage;
-      if (manageFlag === true || String(manageFlag) === '1' || String(manageFlag) === 'true') {
-        // No more manage modal, just go to step 1
-      }
-    } catch (e) { }
-  }, [location?.state]);
-
-  useEffect(() => {
-    resetSessionState({ clearSourceSelection: true });
-    setClientSourceTypes([]);
-    if (sourceForm.source_type !== 'LOCAL') {
-      setSourceType('');
-    }
-    if (selectedClient) {
-      fetchApiSourcesForClient(selectedClient);
-      fetchClientSourceTypes(selectedClient);
-    } else { setApiSources([]); setSelectedApiSource(null); setSelectedEndpoint(''); }
-  }, [selectedClient]);
-
-  useEffect(() => {
-    selectedWorkspaceRef.current = selectedWorkspace;
-  }, [selectedWorkspace]);
-
-  async function fetchClientSourceTypes(client) {
+  const fetchClientSourceTypes = useCallback(async (client) => {
     try {
       const res = await call(`/api-source/client-source-types?client_name=${encodeURIComponent(client)}`);
       const sourceTypes = res.source_types || [];
@@ -279,9 +232,9 @@ export default function OrchestrationStepper({ hideHeader = false }) {
       setClientSourceTypes([]);
       console.warn('Client source type mapping unavailable:', e?.message || e);
     }
-  }
+  }, [call]);
 
-  async function fetchApiSourcesForClient(client) {
+  const fetchApiSourcesForClient = useCallback(async (client) => {
     setApiSourcesLoading(true);
     try {
       const res = await call(`/api-source/list?client_name=${encodeURIComponent(client)}`);
@@ -316,10 +269,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     } finally {
       setApiSourcesLoading(false);
     }
-  }
+  }, [call]);
 
 
-  async function fetchClients() {
+  const fetchClients = useCallback(async () => {
     setClientLoading(true);
     try {
       const res = await call('/config/clients');
@@ -330,7 +283,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     } finally {
       setClientLoading(false);
     }
-  }
+  }, [call, toast]);
+
 
   // Upload handler
   async function handleUpload() {
@@ -385,7 +339,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   function handleDragOver(e) { e.preventDefault(); }
   function handleDragEnter(e) { e.preventDefault(); setIsDragOver(true); }
   function handleDragLeave(e) { e.preventDefault(); setIsDragOver(false); }
-  function removeFile(idx) { setUploadFiles(prev => (Array.isArray(prev) ? prev.filter((_, i) => i !== idx) : prev)); }
+  const removeFile = (idx) => { setUploadFiles(prev => (Array.isArray(prev) ? prev.filter((_, i) => i !== idx) : prev)); };
+
 
   const EXECUTION_NODE_PRIORITY = {
     discover: 0,
@@ -940,6 +895,71 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   // ----- RENDER -----
   const isHistoryView = location.pathname.endsWith('/history');
 
+  // --- Effects (Moved to bottom) ---
+  
+  // Persist Fabric token to sessionStorage whenever it changes
+  useEffect(() => {
+    if (fabricAccessToken) {
+      console.log("STEPPER: Persisting Fabric token to sessionStorage");
+      sessionStorage.setItem('fabric_access_token', fabricAccessToken);
+    }
+  }, [fabricAccessToken]);
+
+  // Restore Fabric token on mount
+  useEffect(() => {
+    const restoreToken = async () => {
+      const storedToken = sessionStorage.getItem('fabric_access_token');
+      if (storedToken) {
+        console.log("STEPPER: Restored Fabric token from sessionStorage");
+        setFabricAccessToken(storedToken);
+      } else {
+        // Try fetching from backend session
+        try {
+          console.log("STEPPER: Attempting to fetch Fabric token from backend");
+          const res = await call('/auth/fabric/token');
+          if (res && res.accessToken) {
+            console.log("STEPPER: Fetched Fabric token from backend");
+            setFabricAccessToken(res.accessToken);
+            sessionStorage.setItem('fabric_access_token', res.accessToken);
+          }
+        } catch (e) {
+          console.warn("STEPPER: Failed to fetch token from backend", e);
+        }
+      }
+    };
+    restoreToken();
+  }, [call]);
+
+  // Fetch initial clients
+  useEffect(() => { fetchClients(); }, [fetchClients]);
+
+  useEffect(() => {
+    try {
+      const manageFlag = location?.state?.manage;
+      if (manageFlag === true || String(manageFlag) === '1' || String(manageFlag) === 'true') {
+        // No more manage modal, just go to step 1
+      }
+    } catch (e) { }
+  }, [location?.state]);
+
+  // Handle client selection changes
+  useEffect(() => {
+    resetSessionState({ clearSourceSelection: true });
+    setClientSourceTypes([]);
+    if (sourceForm.source_type !== 'LOCAL') {
+      setSourceType('');
+    }
+    if (selectedClient) {
+      fetchApiSourcesForClient(selectedClient);
+      fetchClientSourceTypes(selectedClient);
+    } else { setApiSources([]); setSelectedApiSource(null); setSelectedEndpoint(''); }
+  }, [selectedClient, fetchApiSourcesForClient, fetchClientSourceTypes, resetSessionState, sourceForm.source_type]);
+
+  // Sync workspace ref
+  useEffect(() => {
+    selectedWorkspaceRef.current = selectedWorkspace;
+  }, [selectedWorkspace]);
+
   return (
     <div className="orch-root-fullscreen">
       {isHistoryView ? (
@@ -1044,6 +1064,11 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   testResult={testResult}
                   extractedFabricData={extractedFabricData}
                   setExtractedFabricData={setExtractedFabricData}
+                  targets={targets}
+                  setTargets={setTargets}
+                  selectedTarget={selectedTarget}
+                  setSelectedTarget={setSelectedTarget}
+                  fetchTargets={fetchTargets}
                 />
               )}
               {step === 2 && (

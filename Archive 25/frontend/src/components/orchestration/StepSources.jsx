@@ -355,6 +355,8 @@ export default function StepSources({
       setApiEndpoints((prev) => [...new Set([...prev, suggestion.path])]);
     } else if (suggestion.type === "LOCAL" && suggestion.path) {
       setSelectedLocalFiles((prev) => [...new Set([...prev, suggestion.path])]);
+    } else if (suggestion.type === "FABRIC") {
+      setExtractedFabricData(intelligenceData?.raw_cloud_scan || {});
     }
     setSelectedApiSource(registered?.id || `${suggestion.type.toLowerCase()}-suggestion`);
     if (suggestion.tab) setActiveTab(suggestion.tab);

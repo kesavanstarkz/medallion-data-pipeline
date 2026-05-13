@@ -139,6 +139,7 @@ function compactValue(value) {
   if (value == null || value === '') return 'Not captured';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (Array.isArray(value)) return value.length ? value.join(', ') : 'Not captured';
+  if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 
@@ -195,8 +196,92 @@ export default function PipelineIntelligence({
   const [runtimePreview, setRuntimePreview] = useState(null);
   const [runtimePreviewLoading, setRuntimePreviewLoading] = useState(false);
   const [runtimePreviewError, setRuntimePreviewError] = useState(null);
-  const [runtimeActionMessage, setRuntimeActionMessage] = useState(null);
+  const [runtimeActionMessage, setRuntimeActionMessage] = useState('');
   const [runtimeSaveLoading, setRuntimeSaveLoading] = useState(false);
+
+  // Data Normalization Helper
+  const normalizePreviewData = (data) => {
+    if (!data) return null;
+
+    let rows = [];
+    let columns = [];
+
+    // 1. Extract rows
+    if (data.rows && Array.isArray(data.rows)) rows = data.rows;
+    else if (data.sample_rows && Array.isArray(data.sample_rows)) rows = data.sample_rows;
+    else if (Array.isArray(data)) rows = data;
+    else if (data.data && Array.isArray(data.data)) rows = data.data;
+    else if (data.value && Array.isArray(data.value)) rows = data.value;
+
+    // Helper for type inference
+    const inferType = (val) => {
+      if (val === null || val === undefined || val === '') return 'string';
+      if (typeof val === 'number') return Number.isInteger(val) ? 'integer' : 'float';
+      if (typeof val === 'boolean') return 'boolean';
+      const str = String(val).trim();
+      if (/^-?\d+$/.test(str)) return 'integer';
+      if (/^-?\d*\.\d+$/.test(str)) return 'float';
+      if (/^(true|false|yes|no)$/i.test(str)) return 'boolean';
+      if (!isNaN(Date.parse(str))) {
+        if (str.length > 10) return 'timestamp';
+        return 'date';
+      }
+      return 'string';
+    };
+
+    // 2. Extract columns by priority
+    // Priority 1: schema_discovery.columns
+    if (data.schema_discovery?.columns && Array.isArray(data.schema_discovery.columns)) {
+      columns = data.schema_discovery.columns.map(col => {
+        let type = (col.data_type || col.type || 'string').toLowerCase();
+        const colName = col.column_name || col.name || col.displayName;
+        if (type === 'unknown' && rows.length > 0) {
+          type = inferType(rows[0][colName]);
+        }
+        return {
+          name: colName,
+          type: type,
+          nullable: col.nullable ?? true
+        };
+      });
+    } 
+    // Priority 2: data.columns
+    else if (data.columns && Array.isArray(data.columns)) {
+      columns = data.columns.map(col => {
+        const colName = typeof col === 'string' ? col : (col.name || col.column_name || col.displayName);
+        let type = typeof col === 'object' ? (col.type || col.data_type || 'string') : 'string';
+        if ((!type || type === 'string' || type === 'unknown') && rows.length > 0) {
+          type = inferType(rows[0][colName]);
+        }
+        return { name: colName, type, nullable: true };
+      });
+    }
+    // Priority 3: Infer from first row
+    else if (rows.length > 0) {
+      const firstRow = rows[0];
+      columns = Object.keys(firstRow).map(key => ({
+        name: key,
+        type: inferType(firstRow[key]),
+        nullable: true
+      }));
+    }
+
+    return { rows, columns, row_count: rows.length };
+  };
+
+  // Save to Target state
+  const [showSaveTargetModal, setShowSaveTargetModal] = useState(false);
+  const [saveTargetLoading, setSaveTargetLoading] = useState(false);
+  const [saveTargetMode, setSaveTargetMode] = useState('Save Full Data');
+  const [saveTargetTableName, setSaveTargetTableName] = useState('');
+  const [saveTargetSchemaName, setSaveTargetSchemaName] = useState('');
+  const [saveTargetPK, setSaveTargetPK] = useState('');
+  const [saveTargetPartitionKey, setSaveTargetPartitionKey] = useState('');
+  const [saveTargetBatchSize, setSaveTargetBatchSize] = useState(1000);
+  const [availableTargets, setAvailableTargets] = useState([]);
+  const [selectedTargetId, setSelectedTargetId] = useState('');
+  const [saveProgress, setSaveProgress] = useState([]);
+
   const selectedWorkspaceRef = useRef(selectedWorkspace);
   const selectedPipelineRef = useRef(selectedPipeline);
   const runtimeCaptureRequestRef = useRef(0);
@@ -260,7 +345,7 @@ export default function PipelineIntelligence({
     setRuntimeError(null);
     setRuntimePreviewError(null);
     setRuntimePermissionDetail(null);
-    setRuntimeActionMessage(null);
+    setRuntimeActionMessage('');
     setRuntimeLoading(false);
     setRuntimePreviewLoading(false);
     setRuntimeSaveLoading(false);
@@ -274,7 +359,7 @@ export default function PipelineIntelligence({
     setRuntimeError(null);
     setRuntimePreviewError(null);
     setRuntimePermissionDetail(null);
-    setRuntimeActionMessage(null);
+    setRuntimeActionMessage('');
     setRuntimeLoading(false);
     setRuntimePreviewLoading(false);
     setRuntimeSaveLoading(false);
@@ -458,6 +543,31 @@ export default function PipelineIntelligence({
   const runtimeTargetConnection = runtimeDiscovery.target_connection || {};
   const runtimeSchemaDiscovery = runtimeDiscovery.schema_discovery || {};
   const runtimeStatistics = runtimeDiscovery.runtime_statistics || {};
+  
+  const saveSchema = useMemo(() => {
+    // 1. Try currently previewed data (direct or normalized)
+    if (runtimePreview?.columns?.length > 0) {
+      return runtimePreview.columns;
+    }
+    // 2. Try discovered runtime schema
+    if (runtimeSchemaDiscovery?.columns?.length > 0) {
+      return runtimeSchemaDiscovery.columns.map(c => ({
+        name: c.column_name || c.name,
+        type: (c.data_type || c.type || 'string').toLowerCase(),
+        nullable: c.nullable ?? true
+      }));
+    }
+    // 3. Fallback to initial scan data structures
+    const scanColumns = data?.columns || data?.reformatted_config?.columns || data?.schema || data?.reformatted_config?.schema;
+    if (scanColumns && Array.isArray(scanColumns) && scanColumns.length > 0) {
+       return scanColumns.map(c => {
+         const name = typeof c === 'string' ? c : (c.name || c.column_name || c.displayName);
+         const type = typeof c === 'object' ? (c.type || c.data_type || 'string') : 'string';
+         return { name, type: String(type).toLowerCase(), nullable: true };
+       }).filter(c => c.name);
+    }
+    return [];
+  }, [runtimePreview, runtimeSchemaDiscovery, data]);
 
   const handleBundleFile = async (file) => {
     if (!file) return;
@@ -536,7 +646,7 @@ export default function PipelineIntelligence({
     setRuntimeAnalysis(null);
     setRuntimePreview(null);
     setRuntimePreviewError(null);
-    setRuntimeActionMessage(null);
+    setRuntimeActionMessage('');
     try {
       const response = await fetch(apiUrl('/discovery/fabric-runtime-intelligence'), {
         method: 'POST',
@@ -612,14 +722,7 @@ export default function PipelineIntelligence({
         const detail = payload.detail;
         throw new Error(typeof detail === 'object' ? (detail.message || JSON.stringify(detail)) : (detail || 'Failed to preview runtime source.'));
       }
-      if (selectedWorkspaceRef.current?.id !== payloadBody.workspaceId) {
-        console.log('Ignoring stale runtime preview response', {
-          requestWorkspaceId: payloadBody.workspaceId,
-          currentWorkspaceId: selectedWorkspaceRef.current?.id || null,
-        });
-        return;
-      }
-      setRuntimePreview(payload);
+      setRuntimePreview(normalizePreviewData(payload));
     } catch (previewError) {
       if (requestId !== runtimePreviewRequestRef.current) return;
       setRuntimePreview(null);
@@ -667,7 +770,7 @@ export default function PipelineIntelligence({
   const handleSaveRuntimeSource = async () => {
     if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
     setRuntimeSaveLoading(true);
-    setRuntimeActionMessage(null);
+    setRuntimeActionMessage('');
     try {
       const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
       const response = await fetch(apiUrl('/discovery/fabric-runtime-source-save'), {
@@ -698,12 +801,107 @@ export default function PipelineIntelligence({
 
   const handleGenerateIngestionConfig = () => {
     if (!runtimeDiscovery?.ingestion_config) return;
-    setRuntimeActionMessage('Reusable ingestion config was generated from runtime-discovered metadata and is available below.');
+    
+    const configStr = JSON.stringify(runtimeDiscovery.ingestion_config, null, 2);
+    const blob = new Blob([configStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `ingestion_config_${selectedPipeline?.name || 'source'}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    setRuntimeActionMessage('Reusable ingestion config was generated and downloaded.');
   };
 
   const handleBuildPipelineFromSource = () => {
     handleUseRuntimeSource();
-    setRuntimeActionMessage('Runtime source was promoted into the orchestration flow. Continue to the next step to build the pipeline from this source.');
+    setRuntimeActionMessage('Runtime source promoted. Navigating to orchestration...');
+    // We call onConfirm with the latest data to trigger movement to the next step in the parent stepper
+    setTimeout(() => {
+      onConfirm({ ...data, deploymentStrategy: deploymentStrategy || 'REUSE', selectedWorkspace, selectedPipeline });
+    }, 1500);
+  };
+
+  const handleSaveToTarget = async () => {
+    if (!clientName) {
+      setRuntimePreviewError("No client selected.");
+      return;
+    }
+    if (!runtimeSourceConnection?.artifact_id) {
+      setRuntimePreviewError("No source selected.");
+      return;
+    }
+    
+    setRuntimePreviewError(null);
+    setSaveTargetLoading(true);
+    try {
+      const response = await fetch(apiUrl(`/config/targets/${clientName}`));
+      const targets = await response.json();
+      setAvailableTargets(targets || []);
+      
+      if (!targets || targets.length === 0) {
+        setRuntimePreviewError(`No target configured for client '${clientName}'.`);
+        return;
+      }
+      
+      setSelectedTargetId(targets[0].target_id);
+      setSaveTargetTableName(selectedPipeline?.name?.replace(/\s+/g, '_') || 'target_table');
+      setShowSaveTargetModal(true);
+    } catch (e) {
+      setRuntimePreviewError("Failed to fetch target configurations.");
+    } finally {
+      setSaveTargetLoading(false);
+    }
+  };
+
+  const executeSaveToTarget = async () => {
+    setSaveTargetLoading(true);
+    setSaveProgress(['Connecting to target...', 'Validating schema...']);
+    
+    try {
+      const payload = {
+        client_name: clientName,
+        source_name: selectedPipeline?.name,
+        target_id: selectedTargetId,
+        schema: saveSchema,
+        rows: (runtimePreview?.rows || []),
+        save_mode: saveTargetMode,
+        table_name: saveTargetTableName,
+        schema_name: saveTargetSchemaName,
+        batch_size: saveTargetBatchSize,
+        primary_key: saveTargetPK,
+        partition_key: saveTargetPartitionKey
+      };
+
+      setSaveProgress(prev => [...prev, 'Creating table...', 'Writing data...']);
+      
+      const response = await fetch(apiUrl('/config/targets/save-data'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+      
+      if (response.ok) {
+        setSaveProgress(prev => [...prev, 'Finalizing...']);
+        setTimeout(() => {
+          setShowSaveTargetModal(false);
+          setRuntimeActionMessage(`Data successfully saved to target. Rows: ${result.rows_written || 0}, Time: ${result.execution_time}`);
+        }, 1000);
+      } else {
+        setRuntimePreviewError(result.detail || "Target connection failed.");
+        setShowSaveTargetModal(false);
+      }
+    } catch (e) {
+      setRuntimePreviewError("An error occurred during save operation.");
+      setShowSaveTargetModal(false);
+    } finally {
+      setSaveTargetLoading(false);
+    }
   };
 
   return (
@@ -849,6 +1047,150 @@ export default function PipelineIntelligence({
             </div>
           )}
 
+          {/* SAVE TO TARGET MODAL */}
+          {showSaveTargetModal && (
+            <div className="pi-modal-overlay">
+              <div className="pi-modal-content" style={{ maxWidth: 600 }}>
+                <div className="pi-modal-header">
+                  <h3><FiDatabase /> Save Data to Target</h3>
+                  <button className="pi-modal-close" onClick={() => setShowSaveTargetModal(false)}>&times;</button>
+                </div>
+                <div className="pi-modal-body">
+                  {/* DETECTED COLUMNS DEBUG */}
+                  <div className="pi-alert info" style={{ marginBottom: 20, background: '#f0f9ff', borderColor: '#bae6fd', color: '#0369a1' }}>
+                    <div style={{ fontWeight: 800, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <FiLayers /> Detected Schema:
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                      {saveSchema.map(c => (
+                        <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, background: '#fff', padding: '4px 8px', borderRadius: 6, border: '1px solid #e0f2fe' }}>
+                          <FiCheck color="#10b981" />
+                          <span style={{ fontWeight: 700 }}>{c.name}</span>
+                          <span style={{ opacity: 0.6, fontSize: 10 }}>({String(c.type).toUpperCase()})</span>
+                        </div>
+                      ))}
+                      {saveSchema.length === 0 && (
+                        <div style={{ gridColumn: '1/-1', display: 'flex', flexDirection: 'column', gap: 10, width: '100%' }}>
+                          <span style={{ fontStyle: 'italic', fontSize: 13, color: '#ef4444' }}>
+                            None detected. No schema could be inferred from capture or scan results.
+                          </span>
+                          <button 
+                            className="pi-btn-confirm" 
+                            style={{ width: 'fit-content', padding: '6px 14px', fontSize: 12, background: '#3b82f6' }}
+                            onClick={handlePreviewRuntimeSource}
+                            disabled={runtimePreviewLoading}
+                          >
+                            <FiEye /> {runtimePreviewLoading ? 'Fetching Live Schema...' : 'Preview Data Now to Extract Schema'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="pi-kv-grid" style={{ marginBottom: 20 }}>
+                    <div><strong>Selected Client:</strong> {clientName}</div>
+                    <div><strong>Selected Source:</strong> {selectedPipeline?.name}</div>
+                    <div><strong>Target:</strong> 
+                      <select 
+                        className="orch-input" 
+                        value={selectedTargetId} 
+                        onChange={(e) => setSelectedTargetId(e.target.value)}
+                        style={{ padding: '4px 8px', marginLeft: 10, width: 'auto' }}
+                      >
+                        {availableTargets.map(t => (
+                          <option key={t.target_id} value={t.target_id}>{t.target_name} ({t.target_type})</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="pi-form-section">
+                    <label className="pi-form-label">Choose Save Mode</label>
+                    <div className="pi-radio-group" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      {[
+                        'Save Full Data', 'Save Schema Only', 'Create Table Only', 
+                        'Append to Existing Table', 'Overwrite Existing Table', 'Upsert / Merge'
+                      ].map(mode => (
+                        <label key={mode} className="pi-radio-label">
+                          <input 
+                            type="radio" 
+                            name="saveMode" 
+                            checked={saveTargetMode === mode} 
+                            onChange={() => setSaveTargetMode(mode)} 
+                          />
+                          <span>{mode}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pi-grid" style={{ marginTop: 20 }}>
+                    <div className="pi-form-field">
+                      <label>Target Table Name</label>
+                      <input 
+                        type="text" 
+                        className="orch-input" 
+                        value={saveTargetTableName} 
+                        onChange={(e) => setSaveTargetTableName(e.target.value)} 
+                      />
+                    </div>
+                    <div className="pi-form-field">
+                      <label>Schema Name</label>
+                      <input 
+                        type="text" 
+                        className="orch-input" 
+                        placeholder="dbo / public"
+                        value={saveTargetSchemaName} 
+                        onChange={(e) => setSaveTargetSchemaName(e.target.value)} 
+                      />
+                    </div>
+                    <div className="pi-form-field">
+                      <label>Batch Size</label>
+                      <input 
+                        type="number" 
+                        className="orch-input" 
+                        value={saveTargetBatchSize} 
+                        onChange={(e) => setSaveTargetBatchSize(parseInt(e.target.value))} 
+                      />
+                    </div>
+                    {saveTargetMode === 'Upsert / Merge' && (
+                      <div className="pi-form-field">
+                        <label>Primary Key (for upsert)</label>
+                        <input 
+                          type="text" 
+                          className="orch-input" 
+                          placeholder="id"
+                          value={saveTargetPK} 
+                          onChange={(e) => setSaveTargetPK(e.target.value)} 
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {saveTargetLoading && (
+                    <div className="pi-progress-section" style={{ marginTop: 20, padding: 15, background: '#f8fafc', borderRadius: 8 }}>
+                      {saveProgress.map((p, i) => (
+                        <div key={i} style={{ fontSize: 12, color: i === saveProgress.length - 1 ? '#2563eb' : '#64748b', fontWeight: i === saveProgress.length - 1 ? 700 : 400, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {i === saveProgress.length - 1 ? <FiRefreshCw className="spinner" /> : <FiCheck color="#10b981" />} {p}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="pi-modal-footer">
+                  <button className="orch-btn" onClick={() => setShowSaveTargetModal(false)}>Cancel</button>
+                  <button 
+                    className="orch-btn primary" 
+                    onClick={executeSaveToTarget}
+                    disabled={saveTargetLoading || !saveTargetTableName || saveSchema.length === 0}
+                  >
+                    {saveTargetLoading ? 'Processing...' : 'Confirm & Save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="pi-grid">
             <div className="pi-card"><div className="pi-card-title"><FiCpu /> Detected Framework</div><div className="pi-card-content pi-framework">{data.framework || 'Unknown'}</div></div>
             <div className="pi-card"><div className="pi-card-title"><FiDatabase /> Ingestion Support</div><div className="pi-tag-list"><Tag active={support.file_based}>File-based</Tag><Tag active={support.api}>API</Tag><Tag active={support.database}>Database</Tag></div></div>
@@ -866,7 +1208,12 @@ export default function PipelineIntelligence({
                 <div className="pi-card-content">
                   Execute the selected Fabric pipeline, poll live activity runs, capture actual runtime values, and append runtime intelligence below.
                 </div>
-                <button className="pi-btn-confirm" onClick={handleRunRuntimeIntelligence} disabled={runtimeLoading || !selectedWorkspace?.id || !selectedPipeline?.id}>
+                <button 
+                  className="pi-btn-confirm" 
+                  onClick={handleRunRuntimeIntelligence} 
+                  disabled={runtimeLoading || (!selectedWorkspace?.id && !data?.workspace_id) || (!selectedPipeline?.id && !data?.pipeline_id)}
+                  title={(!selectedWorkspace?.id && !data?.workspace_id) || (!selectedPipeline?.id && !data?.pipeline_id) ? "Please select and analyze a pipeline first" : ""}
+                >
                   <FiActivity /> {runtimeLoading ? 'Running & Capturing...' : 'Run & Capture Runtime Intelligence'}
                 </button>
               </div>
@@ -940,6 +1287,9 @@ export default function PipelineIntelligence({
                     </button>
                     <button className="pi-btn-confirm" onClick={handleBuildPipelineFromSource} disabled={!runtimeSourceConnection.artifact_id}>
                       <FiGitBranch /> Build Pipeline From Source
+                    </button>
+                    <button className="pi-btn-confirm" onClick={handleSaveToTarget} disabled={saveTargetLoading}>
+                      <FiDatabase /> {saveTargetLoading ? 'Validating...' : 'Save to Target'}
                     </button>
                   </div>
                   {!runtimeSourceConnection.artifact_id && (
@@ -1032,6 +1382,7 @@ export default function PipelineIntelligence({
                   initialData={runtimePreview} 
                   workspaceId={runtimeSourceConnection.workspace_id}
                   lakehouseId={runtimeSourceConnection.artifact_id}
+                  onDataChange={(newData) => setRuntimePreview(newData)}
                 />
               </div>
 
