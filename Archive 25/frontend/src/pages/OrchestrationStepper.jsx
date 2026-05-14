@@ -18,15 +18,15 @@ import PipelineIntelligence from '../components/PipelineIntelligence';
 import HistoryView from './HistoryView';
 import './orchestration.css';
 
-const STEPS = [
-  { num: 0, label: 'Platform' },
-  { num: 1, label: 'Client' },
-  { num: 2, label: 'Intelligence' },
-  { num: 3, label: 'Sources & Config' },
-  { num: 4, label: 'Deployment' }, // Fabric Only
-  { num: 5, label: 'DQ Rules' },
-  { num: 6, label: 'Review' },
-  { num: 7, label: 'Execution' },
+const STEPS_CONFIG = [
+  { id: 'platform', num: 0, label: 'Platform', path: '/platform' },
+  { id: 'client', num: 1, label: 'Client', path: '/client' },
+  { id: 'intelligence', num: 2, label: 'Intelligence', path: '/intelligence' },
+  { id: 'sources-config', num: 3, label: 'Sources & Config', path: '/sources-config' },
+  { id: 'deployment', num: 4, label: 'Deployment', path: '/deployment' },
+  { id: 'dq-rules', num: 5, label: 'DQ Rules', path: '/dq-rules' },
+  { id: 'review', num: 6, label: 'Review', path: '/review' },
+  { id: 'execution', num: 7, label: 'Execution', path: '/execution' },
 ];
 
 function parseStrictJson(text) {
@@ -42,10 +42,34 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const nav = useNavigate();
   const location = useLocation();
   const { call } = useApi();
-  const [step, setStep] = useState(0);
+  
+  const [step, setStep] = useState(() => {
+    const path = location.pathname.split('/').pop();
+    const found = STEPS_CONFIG.find(s => s.id === path);
+    return found ? found.num : 0;
+  });
+
   const [selectedPlatform, setSelectedPlatform] = useState(localStorage.getItem('selected_platform') || '');
   const [clients, setClients] = useState([]);
   const [selectedClient, setSelectedClient] = useState(localStorage.getItem('client_name') || '');
+  
+  // Navigation Sync
+  useEffect(() => {
+    const path = location.pathname.split('/').pop();
+    const found = STEPS_CONFIG.find(s => s.id === path);
+    if (found && found.num !== step) {
+      setStep(found.num);
+    }
+  }, [location.pathname, step]);
+
+  const goToStep = (s) => {
+    const config = STEPS_CONFIG.find(c => c.num === s);
+    if (config) {
+      setStep(s);
+      nav(`/orchestration-beta/${config.id}`);
+    }
+  };
+
   const [sourceType, setSourceType] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [apiSources, setApiSources] = useState([]);
@@ -78,7 +102,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
   const [intelligenceData, setIntelligenceData] = useState(null);
   const [configPersisted, setConfigPersisted] = useState(false);
   const [clientSourceTypes, setClientSourceTypes] = useState([]);
-  const [selectedSources, setSelectedSources] = useState([]);
   const [extractedFabricData, setExtractedFabricData] = useState(null);
   const [pipelineDeployed, setPipelineDeployed] = useState(false);
 
@@ -153,7 +176,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     setEditingConfigColumns([]);
     setSelectedDqDataset(null);
     setDqError(null);
-    setSelectedSources([]);
     setPipelineDeployed(false);
     setDeploymentStrategy(null);
     setDeploymentPackage(null);
@@ -316,6 +338,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         fetchApiSourcesForClient(selectedClient);
         fetchClientSourceTypes(selectedClient);
         setLocalRefreshTrigger(prev => prev + 1);
+        goToStep(2);
       } else {
         toast('Upload completed with warnings', 'warning');
       }
@@ -395,6 +418,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     const normalizedPayload = {
       source_path: query.source_path,
       source_type: query.source_type,
+      folder_path: query.folder_path || query.source_path,
+      staging_table: query.staging_table || '',
       pipeline_name: query.pipeline_name,
       dataset_id: query.dataset_id,
       bronze_target: query.bronze_target,
@@ -451,7 +476,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
     console.debug('Execution trigger validation passed', normalizedPayload);
 
-    setStep(7);
+    goToStep(7);
     setOrchestrateResp({ progress: [] });
     setIsOrchestrating(true);
     try {
@@ -980,17 +1005,17 @@ export default function OrchestrationStepper({ hideHeader = false }) {
           {/* Stepper Bar */}
           <div className="stepper-bar">
             <div className="stepper-steps-container" style={{ display: 'flex', alignItems: 'center', gap: 0, flex: 1, justifyContent: 'center' }}>
-              {STEPS.map((s, idx) => {
+              {STEPS_CONFIG.map((s, idx) => {
                 // Skip 'Deployment' step label if not Fabric
-                if (s.num === 3 && selectedPlatform !== 'FABRIC') return null;
+                if (s.num === 4 && selectedPlatform !== 'FABRIC') return null;
                 
                 return (
                   <div key={s.num} className={`stepper-item ${step === s.num ? 'active' : ''} ${step > s.num ? 'done' : ''}`}>
-                    <div className="stepper-num" onClick={() => { if (step > s.num) setStep(s.num); }}>
-                      {step > s.num ? <FiCheck size={18} /> : s.num}
+                    <div className="stepper-num" onClick={() => { if (step > s.num) goToStep(s.num); }}>
+                      {step > s.num ? <FiCheck size={18} /> : (s.num + 1)}
                     </div>
                     <span className="stepper-label">{s.label}</span>
-                    {idx < STEPS.length - 1 && <div className="stepper-connector" />}
+                    {idx < STEPS_CONFIG.length - 1 && <div className="stepper-connector" />}
                   </div>
                 );
               })}
@@ -1033,7 +1058,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     setSelectedPlatform(p);
                     localStorage.setItem('selected_platform', p);
                   }}
-                  onNext={() => setStep(1)}
+                  onNext={() => goToStep(1)}
                 />
               )}
               {step === 1 && (
@@ -1049,7 +1074,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                       setClientSourceTypes(['LOCAL']);
                       resetSessionState({ clearSourceSelection: true });
                     }
-                    setStep(2);
+                    goToStep(2);
                   }}
                   call={call}
                   toast={toast}
@@ -1062,6 +1087,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   connectionVerified={connectionVerified}
                   setConnectionVerified={setConnectionVerified}
                   testResult={testResult}
+                  setTestResult={setTestResult}
                   extractedFabricData={extractedFabricData}
                   setExtractedFabricData={setExtractedFabricData}
                   targets={targets}
@@ -1069,6 +1095,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   selectedTarget={selectedTarget}
                   setSelectedTarget={setSelectedTarget}
                   fetchTargets={fetchTargets}
+                  setShowUploadModal={setShowUploadModal}
                 />
               )}
               {step === 2 && (
@@ -1096,9 +1123,18 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                       setIntelligenceData(data);
                       if (data.deploymentStrategy) setDeploymentStrategy(data.deploymentStrategy);
                       if (data.__fabric_access_token) setFabricAccessToken(data.__fabric_access_token);
+                      
+                      // Preload source into orchestration if it's a Fabric runtime promotion
+                      if (data.staging_table || data.source_type === 'NEON_STAGED_SOURCE') {
+                        setSourceType(data.source_type || 'NEON_STAGED_SOURCE');
+                        setFolderPath(data.folder_path || data.source_path || data.staging_table);
+                        setSelectedEndpoint(data.source_path || data.staging_table);
+                        setSelectedApiSource('fabric-runtime');
+                        fetchDatasets(data.folder_path || data.source_path || data.staging_table);
+                      }
                     }
                     // Configure EVERYTHING before deployment
-                    setStep(3);
+                    goToStep(3);
                   }}
                 />
               )}
@@ -1126,7 +1162,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     configPersisted={configPersisted}
                     setConfigPersisted={setConfigPersisted}
                     clientSourceTypes={clientSourceTypes}
-                    setSelectedSources={setSelectedSources}
                     toast={toast}
                     onManualSourceSelected={() => {}}
                     onNext={() => {}}
@@ -1150,9 +1185,9 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     onNext={() => { 
                       fetchDatasets(); 
                       if (selectedPlatform === 'FABRIC') {
-                        setStep(4); // Go to Deployment
+                        goToStep(4); // Go to Deployment
                       } else {
-                        setStep(5); // Go to DQ Rules
+                        goToStep(5); // Go to DQ Rules
                       }
                     }}
                     syncMasterConfig={syncMasterConfig}
@@ -1172,7 +1207,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   deploymentPackage={deploymentPackage}
                   setDeploymentPackage={setDeploymentPackage}
                   fabricAccessToken={fabricAccessToken}
-                  onNext={() => setStep(5)}
+                  onNext={() => goToStep(5)}
                 />
               )}
               {step === 5 && (
@@ -1205,11 +1240,11 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   saveDqConfig={saveDqConfig}
                   editingConfigSaving={editingConfigSaving}
                   formatDatasetLabel={formatDatasetLabel}
-                  onNext={() => setStep(6)}
+                  onNext={() => goToStep(6)}
                   onRunOrchestration={runOrchestration}
                   isOrchestrating={isOrchestrating}
                   datasetsLoading={datasetsLoading}
-                  onBack={() => setStep(selectedPlatform === 'FABRIC' ? 4 : 3)}
+                  onBack={() => goToStep(selectedPlatform === 'FABRIC' ? 4 : 3)}
                 />
               )}
               {step === 6 && (
@@ -1221,7 +1256,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   configPersisted={configPersisted}
                   masterConfig={masterConfig}
                   requiresRealScan={selectedApiSource === 'intelligence-scan'}
-                  onBack={() => setStep(5)}
+                  onBack={() => goToStep(5)}
                   onConfirm={runOrchestration}
                   isOrchestrating={isOrchestrating}
                   fabricMode={sourceForm.fabricMode}

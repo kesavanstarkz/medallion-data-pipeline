@@ -73,6 +73,7 @@ export default function StepReviewConfirm({
     query: {
       source_path: masterConfig?.source_folder || intelligenceData?.reformatted_config?.source_path || folderPath || '',
       source_type: masterConfig?.source_type || (isFabricDeploy ? 'FABRIC' : sourceType),
+      folder_path: masterConfig?.source_folder || intelligenceData?.reformatted_config?.folder_path || folderPath || '',
       pipeline_name: masterConfig?.source_object || selectedPipeline?.name || 'New_Fabric_Pipeline',
       dataset_id: masterConfig?.dataset_id || '',
       bronze_target: masterConfig?.target_layer_bronze || '',
@@ -85,6 +86,7 @@ export default function StepReviewConfirm({
       deployment_strategy: deploymentStrategy,
       workspace_id: selectedWorkspace?.id,
       pipeline_id: selectedPipeline?.id,
+      staging_table: masterConfig?.staging_table || intelligenceData?.staging_table || '',
       package_name: deploymentPackage?.name,
     },
     intelligence: intelligenceData
@@ -166,7 +168,7 @@ export default function StepReviewConfirm({
           <SummaryChip label="Fallback" value={intelligenceData?.is_fallback ? 'Yes' : 'No'} />
           <SummaryChip label="Config Saved" value={configPersisted ? 'Yes' : 'No'} />
           <SummaryChip label="Source" value={sourceType} />
-          <SummaryChip label="Endpoint" value={folderPath} />
+          <SummaryChip label="Endpoint" value={intelligenceData?.staging_table || folderPath} />
         </div>
 
         {/* Structured Intelligence Cards */}
@@ -223,6 +225,23 @@ export default function StepReviewConfirm({
                       {s.type && <span style={{ marginLeft: 8, opacity: 0.6 }}>{s.type}</span>}
                     </div>
                   ))}
+                </div>
+              </IntelCard>
+            )}
+            {selectedPlatform === 'FABRIC' && (
+              <IntelCard icon={<FiDatabase size={15} />} title="Staging Layer (NeonDB)">
+                <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ opacity: 0.7 }}>Provider:</span>
+                    <span style={{ fontWeight: 600 }}>Neon Postgres</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ opacity: 0.7 }}>Status:</span>
+                    <span style={{ color: '#10b981', fontWeight: 600 }}>Ready (Preview Staged)</span>
+                  </div>
+                  <div style={{ fontSize: 10, marginTop: 4, padding: '6px 10px', background: 'rgba(0,0,0,0.03)', borderRadius: 6, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                    ep-dark-morning-aqz49q4z-pooler.c-8.us-east-1.aws.neon.tech
+                  </div>
                 </div>
               </IntelCard>
             )}

@@ -621,10 +621,47 @@ class LocalConnector(MCPSourceConnector):
 
 
 
+
+class FabricConnector(MCPSourceConnector):
+    """
+    Connector for Fabric runtime sources.
+    Reads from NeonDB staging tables to support DQ discovery and preview.
+    """
+    def list_datasets(self, client_name: str, folder_path: str) -> List[DatasetInfo]:
+        # For Fabric, 'folder_path' is often the staging table name in this context
+        return []
+
+    def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        import psycopg2
+        import pandas as pd
+        from io import BytesIO
+        from core.settings import settings
+        
+        # In Fabric mode, file_path_canonical is expected to be the staging table name
+        staging_table = file_path_canonical.split("/")[-1]
+        logger.info(f"FabricConnector: Reading from Neon table {staging_table}")
+        
+        try:
+            conn = psycopg2.connect(settings.NEON_DB_URL)
+            df = pd.read_sql(f"SELECT * FROM {staging_table} LIMIT 100", conn)
+            conn.close()
+            
+            with BytesIO() as buffer:
+                df.to_csv(buffer, index=False)
+                return buffer.getvalue()
+        except Exception as e:
+            logger.error(f"FabricConnector failed to read {staging_table}: {e}")
+            raise RuntimeError(f"FabricConnector failed: {e}")
+
+
+    def list_children(self, client_name: str, folder_path: str) -> Dict[str, Any]:
+        return {"folders": [], "files": []}
+
+
 def get_mcp_connector(source_type: str) -> MCPSourceConnector:
     """
     Factory method to get the appropriate connector.
-    Supported: ADLS, API, LOCAL, S3
+    Supported: ADLS, API, LOCAL, S3, FABRIC
     """
     src = (source_type or "").upper().strip()
     if src == "ADLS":
@@ -635,5 +672,7 @@ def get_mcp_connector(source_type: str) -> MCPSourceConnector:
         return LocalConnector()
     elif src == "S3":
         return S3Connector()
+    elif src in ["FABRIC", "NEON_STAGED_SOURCE"]:
+        return FabricConnector()
     else:
-        raise ValueError(f"Unsupported source type: {source_type}. Supported: ADLS, API, LOCAL, S3")
+        raise ValueError(f"Unsupported source type: {source_type}. Supported: ADLS, API, LOCAL, S3, FABRIC")

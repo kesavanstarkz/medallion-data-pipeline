@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: Optional[str] = None
+    NEON_DB_URL: str = "postgresql://neondb_owner:npg_EyGsgV7kAKC4@ep-dark-morning-aqz49q4z-pooler.c-8.us-east-1.aws.neon.tech/neondb?sslmode=require"
 
     # Azure Storage Settings (replaces AWS S3)
     AZURE_STORAGE_ACCOUNT: Optional[str] = None

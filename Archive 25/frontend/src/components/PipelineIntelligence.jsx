@@ -3,11 +3,11 @@ import {
   FiActivity, FiCheck, FiCloud, FiCpu, FiDatabase, 
   FiFile, FiFolder, FiLink, FiSearch, FiSettings, FiZap, 
   FiRefreshCw, FiCopy, FiEdit2, FiPlus, FiAlertCircle, FiUploadCloud,
-  FiChevronDown, FiChevronRight, FiGitBranch, FiClock, FiLayers, FiEye, FiSave
+  FiChevronDown, FiChevronRight, FiGitBranch, FiClock, FiLayers, FiEye, FiSave, FiShield
 } from 'react-icons/fi';
 import CloudPortalScanModal from './orchestration/CloudPortalScanModal';
 import PipelineFlowCanvas from './orchestration/PipelineFlowCanvas';
-import { apiUrl } from '../hooks/useApi';
+import { useApi, apiUrl } from '../hooks/useApi';
 import DynamicPreviewTable from './DynamicPreviewTable';
 import 'reactflow/dist/style.css';
 import './PipelineIntelligence.css';
@@ -156,6 +156,25 @@ function hasApiScanDetails(apiSources = []) {
   });
 }
 
+function CollapsibleCard({ title, icon, children, defaultOpen = true }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  return (
+    <div className={`pi-card pi-collapsible ${isOpen ? 'open' : 'closed'}`}>
+      <div className="pi-card-title collapsible-header" onClick={() => setIsOpen(!isOpen)} style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {icon} {title}
+        </div>
+        {isOpen ? <FiChevronDown /> : <FiChevronRight />}
+      </div>
+      {isOpen && (
+        <div className="collapsible-content animate-in">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PipelineIntelligence({
   clientName,
   initialData,
@@ -178,19 +197,15 @@ export default function PipelineIntelligence({
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState(null);
   const [target, setTarget] = useState(initialData?.ingestion_details?.target || 'aws');
+  const { call } = useApi();
   const [useCloudLlm, setUseCloudLlm] = useState(true);
   const [showCloudScanModal, setShowCloudScanModal] = useState(false);
   const [scanResults, setScanResults] = useState(null);
   const [deploymentStrategy, setDeploymentStrategy] = useState(null);
-  const [bundleAnalysis, setBundleAnalysis] = useState(null);
   const [runtimeAnalysis, setRuntimeAnalysis] = useState(null);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [runtimeError, setRuntimeError] = useState(null);
   const [runtimePermissionDetail, setRuntimePermissionDetail] = useState(null);
-  const [bundleUploadStatus, setBundleUploadStatus] = useState('idle');
-  const [bundleUploadProgress, setBundleUploadProgress] = useState(0);
-  const [bundleUploadError, setBundleUploadError] = useState(null);
-  const [isBundleDragging, setIsBundleDragging] = useState(false);
   const [fabricAccessToken, setFabricAccessToken] = useState(initialData?.__fabric_access_token || null);
   const [fabricTokenValidation, setFabricTokenValidation] = useState(initialData?.__fabric_token_validation || null);
   const [runtimePreview, setRuntimePreview] = useState(null);
@@ -198,6 +213,7 @@ export default function PipelineIntelligence({
   const [runtimePreviewError, setRuntimePreviewError] = useState(null);
   const [runtimeActionMessage, setRuntimeActionMessage] = useState('');
   const [runtimeSaveLoading, setRuntimeSaveLoading] = useState(false);
+  const [lastPreviewPayload, setLastPreviewPayload] = useState(null);
 
   // Data Normalization Helper
   const normalizePreviewData = (data) => {
@@ -482,35 +498,7 @@ export default function PipelineIntelligence({
   const support = data?.ingestion_support || {};
   const delimiter = data?.delimiter_config || {};
   const capabilities = data?.pipeline_capabilities || {};
-  const graph = bundleAnalysis?.activity_dependency_graph || { nodes: [], edges: [] };
   const runtimeGraph = runtimeAnalysis?.execution_graph || { nodes: [], edges: [] };
-  const graphNodes = useMemo(() => (
-    (graph.nodes || []).map((node, index) => ({
-      id: node.id,
-      data: { label: `${node.label} (${node.type || 'Activity'})` },
-      position: { x: 80 + (index * 220), y: index % 2 === 0 ? 90 : 210 },
-      style: {
-        borderRadius: 12,
-        padding: 10,
-        border: '1px solid #cbd5e1',
-        background: '#fff',
-        fontSize: 12,
-        fontWeight: 700,
-        width: 180
-      }
-    }))
-  ), [graph.nodes]);
-  const graphEdges = useMemo(() => (
-    (graph.edges || []).map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      animated: false,
-      label: (edge.condition || []).join(', ') || undefined,
-      style: { stroke: '#64748b' },
-      labelStyle: { fontSize: 10, fill: '#64748b' }
-    }))
-  ), [graph.edges]);
   const runtimeGraphNodes = useMemo(() => (
     (runtimeGraph.nodes || []).map((node, index) => ({
       id: node.id,
@@ -569,63 +557,6 @@ export default function PipelineIntelligence({
     return [];
   }, [runtimePreview, runtimeSchemaDiscovery, data]);
 
-  const handleBundleFile = async (file) => {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.zip')) {
-      setBundleUploadStatus('error');
-      setBundleUploadError('Only Microsoft Fabric exported ZIP bundles are supported.');
-      return;
-    }
-
-    setBundleUploadStatus('uploading');
-    setBundleUploadProgress(0);
-    setBundleUploadError(null);
-    setBundleAnalysis(null);
-
-    const form = new FormData();
-    form.append('client_name', clientName);
-    if (selectedWorkspace?.id) form.append('workspace_id', selectedWorkspace.id);
-    if (selectedPipeline?.id) form.append('pipeline_id', selectedPipeline.id);
-    form.append('use_cloud_llm', String(useCloudLlm));
-    form.append('existing_analysis_json', JSON.stringify(data || {}));
-    form.append('file', file, file.name);
-
-    await new Promise((resolve) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', apiUrl('/discovery/fabric-bundle-analysis'));
-      if (fabricAccessToken) {
-        xhr.setRequestHeader('Authorization', `Bearer ${fabricAccessToken}`);
-      }
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          setBundleUploadProgress(Math.round((event.loaded / event.total) * 100));
-        }
-      };
-      xhr.onload = () => {
-        try {
-          const payload = JSON.parse(xhr.responseText || '{}');
-          if (xhr.status >= 200 && xhr.status < 300) {
-            setBundleAnalysis(payload);
-            setBundleUploadStatus('success');
-            setBundleUploadProgress(100);
-          } else {
-            setBundleUploadStatus('error');
-            setBundleUploadError(payload.detail || 'Bundle analysis failed.');
-          }
-        } catch {
-          setBundleUploadStatus('error');
-          setBundleUploadError('Bundle analysis returned an invalid response.');
-        }
-        resolve();
-      };
-      xhr.onerror = () => {
-        setBundleUploadStatus('error');
-        setBundleUploadError('Bundle upload failed.');
-        resolve();
-      };
-      xhr.send(form);
-    });
-  };
 
   const handleRunRuntimeIntelligence = async () => {
     const activeWorkspaceId = selectedWorkspaceRef.current?.id;
@@ -722,11 +653,14 @@ export default function PipelineIntelligence({
         const detail = payload.detail;
         throw new Error(typeof detail === 'object' ? (detail.message || JSON.stringify(detail)) : (detail || 'Failed to preview runtime source.'));
       }
+      setLastPreviewPayload(payload);
       setRuntimePreview(normalizePreviewData(payload));
+      return payload; // Return for async callers
     } catch (previewError) {
-      if (requestId !== runtimePreviewRequestRef.current) return;
+      if (requestId !== runtimePreviewRequestRef.current) throw previewError;
       setRuntimePreview(null);
       setRuntimePreviewError(previewError?.message || 'Failed to preview runtime source.');
+      throw previewError;
     } finally {
       if (requestId === runtimePreviewRequestRef.current) {
         setRuntimePreviewLoading(false);
@@ -734,34 +668,90 @@ export default function PipelineIntelligence({
     }
   };
 
-  const handleUseRuntimeSource = () => {
-    if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
-    const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeSourceConnection);
-    const sourcePath = runtimeSourceConnection.full_path || runtimeSourceConnection.folder_path || runtimeSourceConnection.file_name || '';
-    const sourceFormat = runtimeSourceConnection.format ? [runtimeSourceConnection.format] : (data?.file_types || []);
-    const merged = {
+  const handlePreviewRuntimeTarget = async () => {
+    if (!runtimeTargetConnection || Object.keys(runtimeTargetConnection).length === 0) return;
+    const requestId = ++runtimePreviewRequestRef.current;
+    setRuntimePreviewLoading(true);
+    setRuntimePreviewError(null);
+    try {
+      const payloadBody = buildRuntimePreviewPayload(runtimeTargetConnection, runtimeSchemaDiscovery);
+      const response = await fetch(apiUrl('/discovery/fabric-runtime-source-preview'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(fabricAccessToken ? { Authorization: `Bearer ${fabricAccessToken}` } : {}),
+        },
+        body: JSON.stringify(payloadBody),
+      });
+      const payload = await response.json();
+      if (requestId !== runtimePreviewRequestRef.current) return;
+      if (!response.ok) {
+        const detail = payload.detail;
+        throw new Error(typeof detail === 'object' ? (detail.message || JSON.stringify(detail)) : (detail || 'Failed to preview runtime target.'));
+      }
+      setLastPreviewPayload(payload);
+      setRuntimePreview(normalizePreviewData(payload));
+    } catch (previewError) {
+      if (requestId !== runtimePreviewRequestRef.current) return;
+      setRuntimePreview(null);
+      setRuntimePreviewError(previewError?.message || 'Failed to preview runtime target.');
+    } finally {
+      if (requestId === runtimePreviewRequestRef.current) {
+        setRuntimePreviewLoading(false);
+      }
+    }
+  };
+
+  const _preparePromotedData = (discovery, connection, previewPayload) => {
+    if (!discovery || !Object.keys(discovery).length) return data;
+    const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(connection);
+    
+    // If we have pivoted to ADLS, use that metadata; otherwise fallback to detected connection
+    const finalSourceType = previewPayload?.source_type || 'ADLS';
+    const finalSourcePath = previewPayload?.source_path || connection.full_path || connection.folder_path || connection.file_name || '';
+    const finalFolderPath = previewPayload?.folder_path || '';
+    const finalFileName = previewPayload?.file_name || '';
+    const sourceFormat = connection.format ? [connection.format] : (data?.file_types || ['CSV']);
+    
+    const stagingTable = previewPayload?.staging_table || '';
+
+    return {
       ...(data || {}),
       runtime_source_discovery: {
-        ...runtimeDiscovery,
+        ...discovery,
         source_connection: {
-          ...runtimeSourceConnection,
+          ...connection,
           workspace_id: artifactWorkspaceId || activeWorkspaceId,
         },
       },
       ingestion_details: {
         ...(data?.ingestion_details || {}),
-        source_type: 'FABRIC',
+        source_type: finalSourceType,
         target: 'fabric',
       },
       reformatted_config: {
         ...(data?.reformatted_config || {}),
-        source_type: 'FABRIC',
-        source_path: sourcePath,
+        source_type: finalSourceType,
+        source_path: finalSourcePath,
+        folder_path: finalFolderPath,
+        source_object: finalFileName,
+        staging_table: stagingTable,
         pipeline_name: selectedPipeline?.name || data?.reformatted_config?.pipeline_name,
-        runtime_ingestion_config: runtimeDiscovery.ingestion_config,
+        runtime_ingestion_config: discovery.ingestion_config,
+        file_types: sourceFormat
       },
+      source_type: finalSourceType,
+      source_path: finalSourcePath,
+      folder_path: finalFolderPath,
+      source_object: finalFileName,
+      discovery_mode: 'FABRIC_RUNTIME',
+      staging_table: stagingTable,
       file_types: sourceFormat,
     };
+  };
+
+  const handleUseRuntimeSource = () => {
+    const merged = _preparePromotedData(runtimeDiscovery, runtimeSourceConnection, lastPreviewPayload);
     setData(merged);
     onScanComplete?.(merged);
     setRuntimeActionMessage('Runtime source was applied as the reusable source configuration for the next orchestration steps.');
@@ -816,10 +806,120 @@ export default function PipelineIntelligence({
     setRuntimeActionMessage('Reusable ingestion config was generated and downloaded.');
   };
 
-  const handleBuildPipelineFromSource = () => {
-    handleUseRuntimeSource();
-    setRuntimeActionMessage('Runtime source promoted. Navigating to orchestration...');
-    // We call onConfirm with the latest data to trigger movement to the next step in the parent stepper
+  const handleBuildPipelineFromSource = async () => {
+    setRuntimeActionMessage('Checking data staging status...');
+    
+    // Ensure we have a staging table in NeonDB (Preview step)
+    let currentPayload = lastPreviewPayload;
+    if (!currentPayload || !currentPayload.staging_table) {
+      setRuntimeActionMessage('Staging data in NeonDB for preview/export...');
+      try {
+        currentPayload = await handlePreviewRuntimeSource();
+      } catch (err) {
+        setRuntimeActionMessage('Failed to stage data: ' + err.message);
+        return;
+      }
+    }
+
+    setRuntimeActionMessage('Exporting runtime data to ADLS for orchestration...');
+    try {
+      const promoteRes = await call('/discovery/fabric-runtime-promote-v2', 'POST', {
+        client_name: clientName,
+        pipeline_name: selectedPipeline?.name || 'fabric_pipeline',
+        staging_table: currentPayload.staging_table
+      });
+      
+      if (promoteRes.status !== 'SUCCESS') throw new Error('Promotion failed');
+      
+      setRuntimeActionMessage('Data exported to ADLS. Registering orchestration source...');
+
+      // Pivot to ADLS source - this reuses the existing ADLS orchestration path
+      const adlsSource = {
+        ...currentPayload,
+        source_type: 'ADLS',
+        source_path: promoteRes.source_path,
+        folder_path: promoteRes.folder_path,
+        file_name: promoteRes.file_name,
+        file_format: promoteRes.file_format,
+        staging_table: '', // Clear staging table as we are now file-based
+      };
+
+      const merged = _preparePromotedData(runtimeDiscovery, runtimeSourceConnection, adlsSource);
+      setData(merged);
+      onScanComplete?.(merged);
+
+      try {
+        await call('/orchestrate/save-master-config', 'POST', {
+          client_name: clientName,
+          reformatted_config: merged.reformatted_config
+        });
+      } catch (saveErr) {
+        console.warn("Failed to auto-persist master config, proceeding anyway:", saveErr);
+      }
+
+      setRuntimeActionMessage('Success! Pipeline source promoted to ADLS. Redirecting to orchestration flow...');
+      setTimeout(() => {
+        onConfirm?.({ 
+          ...merged, 
+          deploymentStrategy: deploymentStrategy || 'REUSE', 
+          platform: 'FABRIC' 
+        });
+      }, 1500);
+
+    } catch (err) {
+      setRuntimeActionMessage('Failed to promote to ADLS: ' + err.message);
+      console.error('Promotion error:', err);
+    }
+  };
+
+  const handleUseRuntimeTarget = () => {
+    if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
+    const { activeWorkspaceId, artifactWorkspaceId } = validateRuntimeWorkspaceSelection(runtimeTargetConnection);
+    const targetPath = runtimeTargetConnection.full_path || runtimeTargetConnection.folder_path || runtimeTargetConnection.file_name || '';
+    
+    const merged = {
+      ...(data || {}),
+      ingestion_details: {
+        ...(data?.ingestion_details || {}),
+        target_type: 'FABRIC',
+        target: 'fabric',
+        target_path: targetPath,
+      },
+      reformatted_config: {
+        ...(data?.reformatted_config || {}),
+        target_type: 'FABRIC',
+        target_path: targetPath,
+      }
+    };
+    setData(merged);
+    onScanComplete?.(merged);
+    setRuntimeActionMessage('Runtime target configuration applied.');
+  };
+
+  const handleSaveRuntimeTarget = async () => {
+    // Re-use handleSaveRuntimeSource but it already saves both source and target in the backend
+    await handleSaveRuntimeSource();
+    setRuntimeActionMessage('Runtime target metadata saved to registry.');
+  };
+
+  const handleGenerateTargetConfig = () => {
+    if (!runtimeTargetConnection) return;
+    const configStr = JSON.stringify(runtimeTargetConnection, null, 2);
+    const blob = new Blob([configStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `target_config_${selectedPipeline?.name || 'target'}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setRuntimeActionMessage('Target connection config generated.');
+  };
+
+  const handleBuildPipelineFromTarget = () => {
+    handleUseRuntimeTarget();
+    setRuntimeActionMessage('Runtime target promoted. Navigating to orchestration...');
     setTimeout(() => {
       onConfirm({ ...data, deploymentStrategy: deploymentStrategy || 'REUSE', selectedWorkspace, selectedPipeline });
     }, 1500);
@@ -950,50 +1050,48 @@ export default function PipelineIntelligence({
         )}
       </div>
 
-      {/* FABRIC ASSET EXPLORER */}
       {selectedPlatform === 'FABRIC' && scanResults && !data && !loading && !analyzing && (
-        <div className="fabric-explorer-section" style={{ marginTop: 30, padding: 20, background: '#f8fafc', borderRadius: 16, border: '1px solid #e2e8f0' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <h3 style={{ fontSize: 18, fontWeight: 900, display: 'flex', alignItems: 'center', gap: 10, margin: 0 }}>
+        <div className="fabric-explorer-section animate-in">
+          <div className="fabric-explorer-header">
+            <h3 className="fabric-explorer-title">
               <FiFolder color="#2563eb" /> Discovered Fabric Workspaces
             </h3>
-            <span style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{scanResults.length} Workspaces Found</span>
+            <span className="fabric-explorer-count">{scanResults.length} Workspaces Found</span>
           </div>
 
           {scanResults.length > 0 ? (
-            <div className="workspace-list" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div className="workspace-grid">
               {scanResults.map(ws => (
-                <div key={ws.id} className="workspace-card pi-card pi-wide" style={{ background: '#fff', border: '1px solid #e2e8f0', padding: 0, overflow: 'hidden', borderRadius: 12, boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)' }}>
-                  <div style={{ background: '#fff', padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                      <div style={{ padding: 8, background: '#eff6ff', borderRadius: 8 }}><FiDatabase color="#2563eb" size={18} /></div>
-                      <div>
-                        <div style={{ fontWeight: 800, fontSize: 15, color: '#1e293b' }}>{ws.name || ws.displayName}</div>
-                        <div style={{ fontSize: 10, color: '#94a3b8', fontFamily: 'monospace' }}>ID: {ws.id}</div>
+                <div key={ws.id} className="workspace-card">
+                  <div className="workspace-card-header">
+                    <div className="workspace-info">
+                      <div className="workspace-icon"><FiDatabase color="#2563eb" size={18} /></div>
+                      <div className="workspace-text">
+                        <div className="workspace-name" title={ws.name || ws.displayName}>{ws.name || ws.displayName}</div>
+                        <div className="workspace-id">ID: {ws.id}</div>
                       </div>
                     </div>
-                    <div className="pipeline-count-tag" style={{ padding: '4px 10px', background: '#f1f5f9', borderRadius: 20, fontSize: 11, fontWeight: 700, color: '#64748b' }}>
+                    <div className="pipeline-count-tag">
                       {(ws.pipelines || ws.data_pipelines || []).length} Pipelines
                     </div>
                   </div>
-                  <div className="pipeline-list" style={{ padding: 15, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 10, background: '#fafafa' }}>
+                  <div className="pipeline-list">
                     {(ws.pipelines || ws.data_pipelines || []).map(pl => (
-                      <div key={pl.id} style={{ padding: '12px 16px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all 0.2s ease' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div key={pl.id} className="pipeline-item">
+                        <div className="pipeline-info">
                           <FiActivity color="#6366f1" size={16} />
-                          <div style={{ fontSize: 13, fontWeight: 700, color: '#334155' }}>{pl.name || pl.displayName}</div>
+                          <div className="pipeline-name" title={pl.name || pl.displayName}>{pl.name || pl.displayName}</div>
                         </div>
                         <button 
                           className="orch-btn primary tiny" 
                           onClick={() => handleAnalyzePipeline(ws, pl)}
-                          style={{ fontSize: 11, padding: '6px 14px', borderRadius: 8, background: '#2563eb', color: '#fff', border: 'none', cursor: 'pointer', fontWeight: 600 }}
                         >
-                          Analyze Pipeline
+                          Analyze
                         </button>
                       </div>
                     ))}
                     {!(ws.pipelines || ws.data_pipelines || []).length && (
-                      <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '20px', color: '#94a3b8', fontSize: 13, fontStyle: 'italic' }}>
+                      <div className="empty-pipelines">
                         No pipelines discovered in this workspace.
                       </div>
                     )}
@@ -1002,10 +1100,10 @@ export default function PipelineIntelligence({
               ))}
             </div>
           ) : (
-            <div style={{ textAlign: 'center', padding: '40px 20px', background: '#fff', borderRadius: 12, border: '1px dashed #cbd5e1' }}>
-              <FiSearch size={40} color="#94a3b8" style={{ marginBottom: 16 }} />
-              <div style={{ fontWeight: 700, fontSize: 16, color: '#475569' }}>No Workspaces Discovered</div>
-              <p style={{ color: '#94a3b8', fontSize: 14, margin: '8px 0 0' }}>The scan completed but no accessible Fabric workspaces were found.</p>
+            <div className="empty-discovery">
+              <FiSearch size={40} color="#94a3b8" />
+              <div className="empty-discovery-title">No Workspaces Discovered</div>
+              <p className="empty-discovery-sub">The scan completed but no accessible Fabric workspaces were found.</p>
             </div>
           )}
         </div>
@@ -1192,13 +1290,6 @@ export default function PipelineIntelligence({
           )}
 
           <div className="pi-grid">
-            <div className="pi-card"><div className="pi-card-title"><FiCpu /> Detected Framework</div><div className="pi-card-content pi-framework">{data.framework || 'Unknown'}</div></div>
-            <div className="pi-card"><div className="pi-card-title"><FiDatabase /> Ingestion Support</div><div className="pi-tag-list"><Tag active={support.file_based}>File-based</Tag><Tag active={support.api}>API</Tag><Tag active={support.database}>Database</Tag></div></div>
-            <div className="pi-card"><div className="pi-card-title"><FiSettings /> Delimiters</div><div className="pi-card-content">{delimiter.column_delimiter || ','} | {delimiter.quote_char || '"'}</div></div>
-            <div className="pi-card"><div className="pi-card-title"><FiZap /> Capabilities</div><div className="pi-tag-list">{Object.entries(capabilities).map(([k, v]) => <Tag key={k} active={!!v}>{k}</Tag>)}</div></div>
-            <div className="pi-card pi-wide"><div className="pi-card-title"><FiActivity /> Interactive Flow</div><div className="pi-flow-viz">{flow.map((n, i) => <span key={i}>{n.label} {i < flow.length - 1 && '→'} </span>)}</div></div>
-            <div className="pi-card"><div className="pi-card-title">Cloud Scan</div><JsonBlock value={data.raw_cloud_scan || {}} /></div>
-            <div className="pi-card"><div className="pi-card-title">Reformatted Config</div><JsonBlock value={data.reformatted_config || {}} /></div>
           </div>
 
           {selectedPlatform === 'FABRIC' && (
@@ -1248,23 +1339,21 @@ export default function PipelineIntelligence({
             <div className="pi-card pi-wide" style={{ marginTop: 16 }}>
               <div className="pi-card-title"><FiLayers /> Runtime Intelligence Capture</div>
               <div className="pi-grid">
-                <div className="pi-card">
-                  <div className="pi-card-title">Runtime Execution Summary</div>
+                <CollapsibleCard title="Runtime Execution Summary" icon={<FiActivity />}>
                   <div className="pi-kv-grid">
                     <div><strong>Run ID:</strong> {runtimeAnalysis.pipeline_run_id}</div>
                     <div><strong>Status:</strong> {runtimeAnalysis.execution_status}</div>
                     <div><strong>Activities:</strong> {runtimeAnalysis.runtime_metrics?.total_activities ?? 0}</div>
                     <div><strong>Retries:</strong> {runtimeAnalysis.runtime_metrics?.retry_count ?? 0}</div>
                   </div>
-                </div>
-                <div className="pi-card">
-                  <div className="pi-card-title">Runtime Statistics</div>
+                </CollapsibleCard>
+                <CollapsibleCard title="Runtime Statistics" icon={<FiSettings />}>
                   <div className="pi-kv-grid">
                     {Object.entries(runtimeStatistics).map(([key, value]) => (
                       <div key={key}><strong>{prettyLabel(key)}:</strong> {compactValue(value)}</div>
                     ))}
                   </div>
-                </div>
+                </CollapsibleCard>
                 <div className="pi-card">
                   <div className="pi-card-title">Source Connection Card</div>
                   <div className="pi-kv-grid">
@@ -1300,8 +1389,7 @@ export default function PipelineIntelligence({
                   )}
                 </div>
                 {runtimeDiscovery.resolution_diagnostics && runtimeDiscovery.resolution_diagnostics.length > 0 && (
-                  <div className="pi-card">
-                    <div className="pi-card-title">Artifact Resolution Diagnostics</div>
+                  <CollapsibleCard title="Artifact Resolution Diagnostics" icon={<FiSearch />} defaultOpen={false}>
                     <div className="pi-list">
                       {renderListItems(runtimeDiscovery.resolution_diagnostics, (item) => (
                         <div style={{ fontSize: 11, marginBottom: 4 }}>
@@ -1313,7 +1401,7 @@ export default function PipelineIntelligence({
                         </div>
                       ))}
                     </div>
-                  </div>
+                  </CollapsibleCard>
                 )}
                 <div className="pi-card">
                   <div className="pi-card-title">Target Connection Card</div>
@@ -1322,32 +1410,46 @@ export default function PipelineIntelligence({
                       <div key={key}><strong>{prettyLabel(key)}:</strong> {compactValue(value)}</div>
                     ))}
                   </div>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
+                    <button className="pi-btn-confirm" onClick={handlePreviewRuntimeTarget} disabled={runtimePreviewLoading || !runtimeTargetConnection.artifact_id}>
+                      <FiEye /> {runtimePreviewLoading ? 'Loading Preview...' : 'Preview Data'}
+                    </button>
+                    <button className="pi-btn-confirm" onClick={handleUseRuntimeTarget} disabled={!runtimeTargetConnection.artifact_id}>
+                      <FiCheck /> Use Target
+                    </button>
+                    <button className="pi-btn-confirm" onClick={handleSaveRuntimeTarget} disabled={runtimeSaveLoading || !runtimeTargetConnection.artifact_id}>
+                      <FiSave /> {runtimeSaveLoading ? 'Saving...' : 'Save Target'}
+                    </button>
+                    <button className="pi-btn-confirm" onClick={handleGenerateTargetConfig}>
+                      <FiCopy /> Generate Target Config
+                    </button>
+                    <button className="pi-btn-confirm" onClick={handleBuildPipelineFromTarget} disabled={!runtimeTargetConnection.artifact_id}>
+                      <FiGitBranch /> Build Pipeline From Target
+                    </button>
+                  </div>
                 </div>
-                <div className="pi-card">
-                  <div className="pi-card-title">Schema Discovery</div>
+                <CollapsibleCard title="Schema Discovery" icon={<FiLayers />}>
                   <div className="pi-kv-grid">
                     <div><strong>Columns:</strong> {(runtimeSchemaDiscovery.columns || []).length}</div>
                     <div><strong>Timestamp Columns:</strong> {compactValue(runtimeSchemaDiscovery.timestamp_columns)}</div>
                     <div><strong>Nullable Columns:</strong> {compactValue(runtimeSchemaDiscovery.nullable_columns)}</div>
                     <div><strong>Primary Key Candidates:</strong> {compactValue(runtimeSchemaDiscovery.primary_key_candidates)}</div>
                   </div>
-                </div>
-                <div className="pi-card">
-                  <div className="pi-card-title">Activity Intelligence</div>
+                </CollapsibleCard>
+                <CollapsibleCard title="Activity Intelligence" icon={<FiActivity />} defaultOpen={false}>
                   <div className="pi-list">
                     {renderListItems(runtimeDiscovery.activity_intelligence || [], (item) => (
                       item
                     ))}
                   </div>
-                </div>
-                <div className="pi-card">
-                  <div className="pi-card-title">DQ Recommendation Engine</div>
+                </CollapsibleCard>
+                <CollapsibleCard title="DQ Recommendation Engine" icon={<FiShield />} defaultOpen={false}>
                   <div className="pi-list">
                     {renderListItems(runtimeDiscovery.dq_recommendations || [], (item) => (
                       `${item.rule}: ${item.reason}${item.column ? ` [${item.column}]` : ''}`
                     ))}
                   </div>
-                </div>
+                </CollapsibleCard>
                 <div className="pi-card">
                   <div className="pi-card-title">Lineage Visualization</div>
                   <div className="pi-list">
@@ -1497,149 +1599,6 @@ export default function PipelineIntelligence({
             </div>
           )}
 
-          {selectedPlatform === 'FABRIC' && (
-            <div className="pi-bundle-section pi-card pi-wide">
-              <div className="pi-bundle-header">
-                <div>
-                  <div className="pi-card-title" style={{ marginBottom: 6 }}><FiLayers /> Fabric Export Bundle Analysis</div>
-                  <div className="pi-bundle-subtitle">Append uploaded Fabric export metadata to the existing live discovery result and reverse-engineer deeper ingestion logic.</div>
-                </div>
-              </div>
-
-              <div className="pi-upload-status-grid">
-                <div className="pi-card">
-                  <div className="pi-card-title"><FiUploadCloud /> Upload Bundle Status</div>
-                  <div className="pi-upload-zone-wrapper">
-                    <div
-                      className={`upload-zone ${isBundleDragging ? 'dragging' : ''} ${bundleUploadStatus === 'uploading' ? 'loading' : ''}`}
-                      onDragOver={(event) => { event.preventDefault(); setIsBundleDragging(true); }}
-                      onDragLeave={() => setIsBundleDragging(false)}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        setIsBundleDragging(false);
-                        handleBundleFile(event.dataTransfer.files?.[0]);
-                      }}
-                    >
-                      <input
-                        type="file"
-                        id="fabric-bundle-upload"
-                        hidden
-                        accept=".zip"
-                        onChange={(event) => handleBundleFile(event.target.files?.[0])}
-                      />
-                      <label htmlFor="fabric-bundle-upload" className="pi-upload-label">
-                        {bundleUploadStatus === 'uploading' ? <div className="pi-spinner" /> : <FiUploadCloud size={42} color="#2563eb" />}
-                        <div className="pi-upload-title">{bundleUploadStatus === 'uploading' ? 'Uploading and analyzing bundle...' : 'Click or Drag ZIP to Upload'}</div>
-                        <div className="pi-upload-help">Supports Microsoft Fabric exported pipeline bundles (.zip)</div>
-                      </label>
-                    </div>
-                    <div className="pi-upload-meta">
-                      <div>Status: <strong>{bundleUploadStatus.toUpperCase()}</strong></div>
-                      <div>Progress: <strong>{bundleUploadProgress}%</strong></div>
-                    </div>
-                    {bundleUploadStatus === 'uploading' && (
-                      <div className="pi-progress-bar">
-                        <div className="pi-progress-bar-fill" style={{ width: `${bundleUploadProgress}%` }} />
-                      </div>
-                    )}
-                    {bundleUploadError && <div className="pi-error" style={{ marginTop: 12 }}><FiAlertCircle /> {bundleUploadError}</div>}
-                  </div>
-                </div>
-
-                <div className="pi-card">
-                  <div className="pi-card-title"><FiFile /> Manifest Analysis</div>
-                  {bundleAnalysis ? (
-                    <div className="pi-kv-grid">
-                      <div><strong>Name:</strong> {renderValue(bundleAnalysis.manifest_analysis?.name, 'Unknown')}</div>
-                      <div><strong>Type:</strong> {renderValue(bundleAnalysis.manifest_analysis?.type, 'Unknown')}</div>
-                      <div><strong>Files:</strong> {bundleAnalysis.manifest_analysis?.file_count || 0}</div>
-                      <div><strong>Pipeline JSON:</strong> {bundleAnalysis.manifest_analysis?.selected_pipeline_path || 'Unknown'}</div>
-                    </div>
-                  ) : (
-                    <div className="pi-card-content">Upload a Fabric export bundle to inspect `manifest.json` and bundle metadata.</div>
-                  )}
-                </div>
-              </div>
-
-              {bundleAnalysis && (
-                <>
-                  <div className="pi-grid" style={{ marginTop: 16 }}>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiSearch /> Source Discovery</div>
-                      <div className="pi-tag-list">
-                        {(bundleAnalysis.source_discovery?.linked_services || []).map((item, index) => <Tag key={`${renderValue(item, 'item')}-${index}`}>{renderValue(item, 'Unknown')}</Tag>)}
-                        {!bundleAnalysis.source_discovery?.linked_services?.length && <span className="pi-card-content">No linked services discovered.</span>}
-                      </div>
-                    </div>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiDatabase /> Ingestion Intelligence</div>
-                      <div className="pi-kv-grid">
-                        <div><strong>Source:</strong> {renderValue(bundleAnalysis.ingestion_intelligence?.source_system, 'Not present')}{renderEvidenceMeta(bundleAnalysis.ingestion_intelligence?.source_system)}</div>
-                        <div><strong>Endpoint:</strong> {renderValue(bundleAnalysis.ingestion_intelligence?.endpoint, 'Not present')}{renderEvidenceMeta(bundleAnalysis.ingestion_intelligence?.endpoint)}</div>
-                        <div><strong>Frequency:</strong> {renderValue(bundleAnalysis.ingestion_intelligence?.frequency, 'Not present')}{renderEvidenceMeta(bundleAnalysis.ingestion_intelligence?.frequency)}</div>
-                        <div><strong>Trigger:</strong> {renderValue(bundleAnalysis.ingestion_intelligence?.trigger_type, 'Not present')}{renderEvidenceMeta(bundleAnalysis.ingestion_intelligence?.trigger_type)}</div>
-                      </div>
-                    </div>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiFile /> File Structure Intelligence</div>
-                      <div className="pi-kv-grid">
-                        <div><strong>Delimiters:</strong> {renderValue(bundleAnalysis.file_structure_intelligence?.delimiters, 'Not present')}</div>
-                        <div><strong>Nested:</strong> {renderValue(bundleAnalysis.file_structure_intelligence?.nested_structures, 'None')}</div>
-                        <div><strong>Mandatory Fields:</strong> {(bundleAnalysis.file_structure_intelligence?.mandatory_fields || []).length}</div>
-                        <div><strong>Date Formats:</strong> {renderValue(bundleAnalysis.file_structure_intelligence?.date_formats, 'Not present')}</div>
-                      </div>
-                    </div>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiCheck /> DQ Recommendations</div>
-                      <div className="pi-list">
-                        {renderListItems(bundleAnalysis.dq_recommendations || [], (item) => (
-                          typeof item === 'object'
-                            ? `${item.rule || 'Rule'}: ${item.reason || 'No reason'}${item.evidence ? ` (${item.evidence})` : ''}`
-                            : String(item)
-                        ))}
-                      </div>
-                    </div>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiClock /> Trigger & Scheduling Analysis</div>
-                      <div className="pi-kv-grid">
-                        <div><strong>Trigger Type:</strong> {renderValue(bundleAnalysis.trigger_scheduling_analysis?.scheduling?.trigger_type, 'Not present')}{renderEvidenceMeta(bundleAnalysis.trigger_scheduling_analysis?.scheduling?.trigger_type)}</div>
-                        <div><strong>Frequency:</strong> {renderValue(bundleAnalysis.trigger_scheduling_analysis?.scheduling?.frequency, 'Not present')}{renderEvidenceMeta(bundleAnalysis.trigger_scheduling_analysis?.scheduling?.frequency)}</div>
-                        <div><strong>Retry Policies:</strong> {(bundleAnalysis.trigger_scheduling_analysis?.retry_policies || []).length}</div>
-                        <div><strong>Triggers:</strong> {(bundleAnalysis.trigger_scheduling_analysis?.triggers || []).length}</div>
-                      </div>
-                    </div>
-                    <div className="pi-card">
-                      <div className="pi-card-title"><FiZap /> AI Insights Panel</div>
-                      <div className="pi-list">
-                        {renderListItems(bundleAnalysis.ai_structured_output?.ai_insights || [], (item) => (
-                          typeof item === 'object' ? JSON.stringify(item) : String(item)
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pi-card pi-wide" style={{ marginTop: 16 }}>
-                    <div className="pi-card-title"><FiGitBranch /> Activity Dependency Graph</div>
-                    {graphNodes.length ? (
-                      <PipelineFlowCanvas nodes={graphNodes} edges={graphEdges} />
-                    ) : (
-                      <div className="pi-card-content">No activity graph could be derived from the uploaded/exported configuration.</div>
-                    )}
-                  </div>
-
-                  <div className="pi-card pi-wide" style={{ marginTop: 16 }}>
-                    <div className="pi-card-title"><FiRefreshCw /> Extracted Config Viewer</div>
-                    <div className="pi-json-grid">
-                      <SearchableJsonPanel title="Raw Uploaded JSON" value={bundleAnalysis.uploaded_pipeline_config?.raw_uploaded_json} defaultOpen />
-                      <SearchableJsonPanel title="Raw manifest.json" value={bundleAnalysis.uploaded_pipeline_config?.raw_manifest_json} />
-                      <SearchableJsonPanel title="Final Merged Config" value={bundleAnalysis.final_pipeline_config} />
-                      <SearchableJsonPanel title="AI-Generated Structured Output" value={bundleAnalysis.ai_structured_output} />
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
 
           <div className="pi-actions">
             <button className="pi-btn-confirm" onClick={() => onConfirm({ ...data, deploymentStrategy, selectedWorkspace, selectedPipeline })} disabled={selectedPlatform === 'FABRIC' && !deploymentStrategy}>

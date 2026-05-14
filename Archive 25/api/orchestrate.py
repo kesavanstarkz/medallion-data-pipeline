@@ -46,7 +46,7 @@ def _canonical_source_type(value: Optional[str]) -> Optional[str]:
         return "AZURE"
     if raw in {"API", "REST", "REST_API"}:
         return "REST_API"
-    if raw in {"FABRIC", "MICROSOFT_FABRIC"}:
+    if raw in {"FABRIC", "MICROSOFT_FABRIC", "LAKEHOUSE", "DELIMITEDTEXTSOURCE"}:
         return "FABRIC"
     if raw == "LOCAL":
         return "LOCAL"
@@ -137,6 +137,9 @@ def run(
     require_real_scan: bool      = False,
     platform:     Optional[str]  = None,
     discovery_mode: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    pipeline_id:  Optional[str] = None,
+    staging_table: Optional[str] = None,
     db:           Session        = Depends(get_db),
 ):
     """
@@ -160,11 +163,13 @@ def run(
         src = "S3"
     elif src == "AZURE":
         src = "ADLS"
+    elif src == "FABRIC":
+        src = "FABRIC"
     configured_types = _configured_source_types(client_name, db)
     requested_type = _canonical_source_type(src)
     
     # Fabric Runtime Bypass: Skip source type validation if driven by Fabric runtime discovery
-    is_fabric_runtime = (platform == "FABRIC") and (discovery_mode == "FABRIC_RUNTIME")
+    is_fabric_runtime = (platform == "FABRIC") and (discovery_mode == "FABRIC_RUNTIME" or bool(staging_table))
     
     if not is_fabric_runtime and configured_types and requested_type not in configured_types:
         logger.warning(f"Execution rejected for client={client_name}: requested={requested_type}, configured={sorted(configured_types)}")
@@ -199,11 +204,11 @@ def run(
             raise HTTPException(status_code=400, detail="Please perform a real scan using credentials before execution.")
 
     # All sources — go through full LangGraph orchestration
-    if not folder_path and src not in ("LOCAL", "S3"):
+    if not folder_path and src not in ("LOCAL", "S3", "FABRIC"):
         raise HTTPException(
             status_code=400,
             detail=f"folder_path is required for source_type={src}. "
-                   f"For LOCAL or S3 sources, folder_path is not needed."
+                   f"For LOCAL, S3, or FABRIC sources, folder_path is not needed if metadata is provided."
         )
     try:
         graph = build_graph().compile()
@@ -211,9 +216,12 @@ def run(
             "source_type": src,
             "client_name": client_name,
             "folder_path": folder_path,
+            "batch_id": batch_id,
+            "platform": platform,
+            "discovery_mode": discovery_mode,
+            "staging_table": staging_table,
+            "progress": {}
         }
-        if batch_id:
-            state["batch_id"] = batch_id
         
         # Determine the batch_id and create a history record
         active_batch = state.get("batch_id") or datetime.now().strftime("%b-%d-%H")
@@ -508,7 +516,7 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
         
         if df.empty:
              # LAST RESORT: Check for dynamic Fabric Runtime Config in DB (MasterConfigAuthoritative)
-             from models.master_config import MasterConfigAuthoritative
+             from models.master_config_authoritative import MasterConfigAuthoritative
              runtime_results = db.query(MasterConfigAuthoritative).filter(
                  MasterConfigAuthoritative.client_name == client_name,
                  MasterConfigAuthoritative.is_active == True,
@@ -532,6 +540,7 @@ def get_master_config(client_name: str, source_type: str = None, dataset_ids: st
                          "target_layer_silver": r.target_layer_silver,
                          "is_active": r.is_active,
                          "load_type": r.load_type,
+                         "staging_table": r.staging_table,
                      })
                  
                  if stream:
@@ -598,13 +607,14 @@ def save_master_config(request: dict, db: Session = Depends(get_db)):
         "pipeline_id": client_name.upper(),
         "client_name": client_name,
         "source_type": reformatted.get("source_type") or "FABRIC_RUNTIME",
-        "source_folder": reformatted.get("source_path") or "",
-        "source_object": reformatted.get("pipeline_name") or "Fabric Pipeline",
+        "source_folder": reformatted.get("folder_path") or reformatted.get("source_path") or "",
+        "source_object": reformatted.get("source_object") or reformatted.get("file_name") or "source_export.csv",
         "file_format": (reformatted.get("file_types") or ["CSV"])[0],
         "target_layer_bronze": f"Bronze/{client_name}/{reformatted.get('pipeline_name')}",
         "target_layer_silver": f"Silver/{client_name}/{reformatted.get('pipeline_name')}",
         "is_active": True,
         "load_type": "full",
+        "staging_table": reformatted.get("staging_table") or "",
         "created_at": datetime.utcnow().isoformat()
     }
     

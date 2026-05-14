@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder, FiDatabase, FiServer, FiCpu, FiHardDrive, FiShare2, FiShield, FiInfo, FiChevronRight, FiEdit2 } from 'react-icons/fi';
+import { FiCheck, FiSearch, FiPlus, FiRefreshCw, FiTrash2, FiClock, FiAlertTriangle, FiX, FiLink, FiBox, FiCloud, FiFolder, FiDatabase, FiServer, FiCpu, FiHardDrive, FiShare2, FiShield, FiInfo, FiChevronRight, FiEdit2, FiUploadCloud } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import FluentSelect from '../FluentSelect';
@@ -14,8 +14,9 @@ const itemVariants = {
 export default function StepClient({ 
   clients, clientLoading, selectedClient, setSelectedClient, fetchClients, onNext, call, toast, 
   sourceForm, setSourceForm, registerSource, savingSource, testConnection, testingConnection, 
-  connectionVerified, setConnectionVerified, testResult, extractedFabricData, setExtractedFabricData, 
-  onDeploySuccess, targets, setTargets, selectedTarget, setSelectedTarget, fetchTargets 
+  connectionVerified, setConnectionVerified, testResult, setTestResult, extractedFabricData, setExtractedFabricData, 
+  onDeploySuccess, targets, setTargets, selectedTarget, setSelectedTarget, fetchTargets,
+  setShowUploadModal
 }) {
   const navigate = useNavigate();
   const [tab, setTab] = useState('existing'); // 'existing' | 'register' | 'target'
@@ -163,6 +164,41 @@ export default function StepClient({
     }
   };
 
+  // 4. Source Type Switching Bug - Reset stale fields
+  useEffect(() => {
+    const { source_type } = sourceForm;
+    // Keep client_name but reset others if not switching back to same type
+    setSourceForm(prev => ({
+      ...prev,
+      source_name: '',
+      base_url: '',
+      auth_type: 'none',
+      auth_token: '',
+      endpoints: '',
+      aws_access_key_id: '',
+      aws_secret_access_key: '',
+      region: '',
+      bucket_name: '',
+      azure_account_name: '',
+      azure_account_key: '',
+      azure_container_name: '',
+      source_type // preserve current selection
+    }));
+    setConnectionVerified(false);
+    setTestResult(null);
+  }, [sourceForm.source_type]);
+
+  const canRegister = () => {
+    if (!sourceForm.client_name) return false;
+    if (sourceForm.source_type === 'LOCAL') return true;
+    
+    const hasSourceName = !!sourceForm.source_name;
+    if (!hasSourceName) return false;
+
+    // For cloud/API, connection must be verified OR it's an API that can skip
+    return connectionVerified || apiCanSkipConnection;
+  };
+
   return (
     <motion.div
       key="step1"
@@ -171,28 +207,25 @@ export default function StepClient({
       exit={{ opacity: 0, x: -20 }}
       className="orch-step-panel"
     >
-      <div className="step-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
-        <div style={{ flex: 1 }}>
-          <h2 className="step-title" style={{ margin: 0, fontSize: 24, fontWeight: 900, background: 'linear-gradient(90deg, var(--text1), var(--text2))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>DEA Agent — Client Setup</h2>
-          <p className="step-sub" style={{ margin: '4px 0 0', opacity: 0.8, fontSize: 13, fontWeight: 500 }}>Register a new client or choose an existing one to begin.</p>
+      <div className="step-header-responsive">
+        <div className="step-header-text">
+          <h2 className="step-title">DEA Agent — Client Setup</h2>
+          <p className="step-sub">Register a new client or choose an existing one to begin.</p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
-          {/* Moved Tab Toggle to Top Right */}
-          <div className="step-tabs" style={{ margin: 0, scale: 0.9 }}>
+        <div className="step-header-actions">
+          <div className="step-tabs">
             <button
               className={`step-tab ${tab === 'existing' ? 'active' : ''}`}
               onClick={() => setTab('existing')}
-              style={{ padding: '8px 20px' }}
             >
               Choose Existing
             </button>
             <button
               className={`step-tab ${tab === 'register' ? 'active' : ''}`}
               onClick={() => setTab('register')}
-              style={{ padding: '8px 20px' }}
             >
-              <FiPlus style={{ marginRight: 6 }} /> Register Client
+              <FiPlus /> Register Client
             </button>
             <button
               className={`step-tab ${tab === 'target' ? 'active' : ''}`}
@@ -203,198 +236,147 @@ export default function StepClient({
                 }
                 setTab('target');
               }}
-              style={{ padding: '8px 20px' }}
             >
-              <FiShare2 style={{ marginRight: 6 }} /> Targets
+              <FiShare2 /> Targets
             </button>
           </div>
 
-          <div className="header-logo-divider" style={{ width: 1, height: 24, background: 'rgba(0,0,0,0.1)' }} />
-          <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
+          <div className="header-logo-divider" />
+          <img src={logo} alt="Agilisium" className="step-header-logo" />
         </div>
       </div>
 
-      {tab === 'existing' && (
-        <div className="step-body">
-          {/* Search Bar / Actions */}
-          <div className="client-search-bar" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <FiSearch className="search-icon" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text2)' }} />
-              <input
-                type="text"
-                placeholder="Search clients..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="search-input"
-                style={{ width: '100%', paddingLeft: 40 }}
-              />
+      <div className="step-body">
+        {tab === 'existing' && (
+          <div className="existing-client-container">
+            <div className="client-search-bar">
+              <div className="search-input-wrapper">
+                <FiSearch className="search-icon" />
+                <input
+                  type="text"
+                  placeholder="Search clients..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="search-input"
+                />
+              </div>
+
+              <button className="orch-btn ghost tiny" onClick={fetchClients} title="Refresh Client List">
+                <FiRefreshCw className="spin-on-hover" />
+              </button>
             </div>
 
-            <button className="orch-btn ghost tiny" onClick={fetchClients} title="Refresh Client List">
-              <FiRefreshCw />
-            </button>
-          </div>
-
-          <div className="client-grid">
-            {clientLoading ? (
-              Array.from({ length: 8 }).map((_, i) => (
-                <div key={i} className="client-card skeleton" aria-hidden>
-                  <div className="skeleton-circle" style={{ width: 44, height: 44, borderRadius: 12 }} />
-                  <div style={{ flex: 1 }}>
-                    <div className="skeleton-line" style={{ width: '70%', height: 14 }} />
-                    <div className="skeleton-line" style={{ width: '50%', height: 10, marginTop: 6 }} />
+            <div className="client-grid-responsive">
+              {clientLoading ? (
+                Array.from({ length: 8 }).map((_, i) => (
+                  <div key={i} className="client-card skeleton" aria-hidden>
+                    <div className="skeleton-circle" style={{ width: 44, height: 44, borderRadius: 12 }} />
+                    <div style={{ flex: 1 }}>
+                      <div className="skeleton-line" style={{ width: '70%', height: 14 }} />
+                      <div className="skeleton-line" style={{ width: '50%', height: 10, marginTop: 6 }} />
+                    </div>
                   </div>
+                ))
+              ) : filteredClients.length === 0 ? (
+                <div className="empty-client-state">
+                  <p>{searchQuery ? `No clients matching "${searchQuery}"` : 'No clients found. Register one first.'}</p>
                 </div>
-              ))
-            ) : filteredClients.length === 0 ? (
-              <div className="empty-client-state">
-                <p>{searchQuery ? `No clients matching "${searchQuery}"` : 'No clients found. Register one first.'}</p>
-              </div>
-            ) : (
-              filteredClients.map((c) => (
-                <motion.div
-                  key={c}
-                  variants={itemVariants}
-                  initial="initial"
-                  animate="animate"
-                  className={`client-card ${selectedClient === c ? 'selected' : ''}`}
-                  onClick={() => handleSelectClient(c)}
-                  role="button"
-                  style={{ position: 'relative' }}
-                >
-                  <div className="client-avatar">
-                    {c.split(/[-_ ]/).map(p => p[0]).slice(0, 2).join('').toUpperCase()}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div className="client-name">{c}</div>
-                    <div className="client-env">Azure Environment</div>
-                  </div>
-                  <div className="client-marker" style={{ position: 'absolute', right: 12, top: 12 }}>
-                    <div className="client-card-actions">
-                      <button
-                        className="delete-client-btn"
-                        onClick={(e) => deleteClient(e, c)}
-                        title="Delete Client"
-                      >
-                        <FiTrash2 size={14} />
-                      </button>
+              ) : (
+                filteredClients.map((c) => (
+                  <motion.div
+                    key={c}
+                    variants={itemVariants}
+                    initial="initial"
+                    animate="animate"
+                    className={`client-card ${selectedClient === c ? 'selected' : ''}`}
+                    onClick={() => handleSelectClient(c)}
+                    role="button"
+                  >
+                    <div className="client-avatar">
+                      {c.split(/[-_ ]/).map(p => p[0]).slice(0, 2).join('').toUpperCase()}
                     </div>
-                    {selectedClient === c && (
-                      <div className="selection-badge">
-                        <FiCheck size={12} />
+                    <div className="client-info">
+                      <div className="client-name">{c}</div>
+                      <div className="client-env">Active Infrastructure</div>
+                    </div>
+                    <div className="client-card-status">
+                      <div className="client-card-actions">
+                        <button
+                          className="delete-client-btn"
+                          onClick={(e) => deleteClient(e, c)}
+                          title="Delete Client"
+                        >
+                          <FiTrash2 size={14} />
+                        </button>
                       </div>
-                    )}
-                  </div>
-                </motion.div>
-              ))
+                      {selectedClient === c && (
+                        <div className="selection-badge">
+                          <FiCheck size={12} />
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                ))
+              )}
+            </div>
+
+            {selectedClient && (
+              <div className="registered-targets-section">
+                <div className="section-header">
+                  <h4 className="section-title">
+                    <FiShare2 /> Registered Targets for {selectedClient}
+                  </h4>
+                  <button 
+                    className="orch-btn ghost tiny" 
+                    onClick={() => { setTargetType('None'); setTargetFields({}); setTab('target'); }}
+                  >
+                    <FiPlus /> New Target
+                  </button>
+                </div>
+                
+                <div className="target-grid-responsive">
+                  {(targets || []).map(t => (
+                    <div 
+                      key={t.target_id} 
+                      className={`target-card-premium ${selectedTarget?.target_id === t.target_id ? 'selected' : ''}`}
+                      onClick={() => setSelectedTarget(t)}
+                    >
+                      <div className="target-card-header">
+                        <div className="target-icon-box">
+                          <FiDatabase size={18} />
+                        </div>
+                        <div className="target-card-actions">
+                          <button className="orch-btn ghost tiny" onClick={(e) => { e.stopPropagation(); handleEditTarget(t); }}><FiEdit2 size={14} /></button>
+                          <button className="orch-btn ghost tiny" onClick={(e) => handleDeleteTarget(e, t)}><FiTrash2 size={14} /></button>
+                        </div>
+                      </div>
+                      <div className="target-info">
+                        <div className="target-name">{t.target_name}</div>
+                        <div className="target-type">{t.target_type}</div>
+                      </div>
+                      {selectedTarget?.target_id === t.target_id && (
+                        <div className="target-selected-mark">
+                          <FiCheck size={10} /> Selected
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {(!targets || targets.length === 0) && (
+                    <div className="empty-target-state">
+                      No targets configured for this client.
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
+        )}
 
-          {/* Registered Targets for Selected Client */}
-          {selectedClient && (
-            <div className="registered-targets-section" style={{ marginTop: 32 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h4 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <FiShare2 size={14} /> Registered Targets for {selectedClient}
-                </h4>
-                <button 
-                  className="orch-btn ghost tiny" 
-                  onClick={() => { setTargetType('None'); setTargetFields({}); setTab('target'); }}
-                  style={{ fontSize: 11 }}
-                >
-                  <FiPlus style={{ marginRight: 4 }} /> New Target
-                </button>
-              </div>
-              
-              <div className="target-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-                {(targets || []).map(t => (
-                  <div 
-                    key={t.target_id} 
-                    className={`target-card ${selectedTarget?.target_id === t.target_id ? 'selected' : ''}`}
-                    onClick={() => setSelectedTarget(t)}
-                    style={{
-                      padding: '12px 16px',
-                      background: '#fff',
-                      border: '1px solid var(--border)',
-                      borderRadius: 12,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                      position: 'relative',
-                      transition: 'all 0.2s ease',
-                      border: selectedTarget?.target_id === t.target_id ? '2px solid var(--blue)' : '1px solid var(--border)'
-                    }}
-                  >
-                    <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--blue-bg)', color: 'var(--blue)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <FiDatabase size={16} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.target_name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{t.target_type}</div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button className="orch-btn ghost tiny" onClick={(e) => { e.stopPropagation(); handleEditTarget(t); }} style={{ padding: 4 }}><FiEdit2 size={12} /></button>
-                      <button className="orch-btn ghost tiny" onClick={(e) => handleDeleteTarget(e, t)} style={{ padding: 4, color: 'var(--red)' }}><FiTrash2 size={12} /></button>
-                    </div>
-                  </div>
-                ))}
-                {(!targets || targets.length === 0) && (
-                  <div style={{ gridColumn: '1/-1', padding: '16px', textAlign: 'center', color: 'var(--text3)', fontSize: 12, background: 'var(--surface2)', borderRadius: 12, border: '1px dashed var(--border)' }}>
-                    No targets configured for this client.
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Footer Actions - Selected Client Only */}
-
-          {/* Footer Actions - Selected Client Only */}
-          <AnimatePresence>
-            {selectedClient && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.98, y: 10 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98, y: 10 }}
-                className="step-footer-actions-container"
-                style={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  alignItems: 'center',
-                  gap: 12,
-                  marginTop: 32,
-                  padding: '20px',
-                  background: 'rgba(255, 255, 255, 0.4)',
-                  backdropFilter: 'blur(10px)',
-                  borderRadius: '20px',
-                  border: '1px solid rgba(255, 255, 255, 0.5)',
-                  boxShadow: '0 8px 32px rgba(0,0,0,0.04)'
-                }}
-              >
-                <button
-                  className="orch-btn primary premium-btn"
-                  onClick={onNext}
-                  style={{
-                    height: 48,
-                    padding: '0 32px',
-                    fontSize: '15px'
-                  }}
-                >
-                  Continue with <strong>{selectedClient}</strong> →
-                </button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      )}
-
-      {tab === 'register' && (
-        <div className="step-body">
-          <div className="register-form">
-            <div className="register-field full" style={{ marginBottom: 20 }}>
-              <label>Select Source Type to Register</label>
-              <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+        {tab === 'register' && (
+          <div className="register-client-container">
+            <div className="register-field full">
+              <label>Select Source Type</label>
+              <div className="source-type-grid-responsive">
                 {[
                   { id: 'LOCAL', label: 'Local Files', icon: <FiFolder />, color: '#10b981', desc: 'Direct upload' },
                   { id: 'API', label: 'REST API', icon: <FiLink />, color: '#3b82f6', desc: 'Secure endpoints' },
@@ -407,15 +389,9 @@ export default function StepClient({
                     whileTap={{ scale: 0.98 }}
                     onClick={() => {
                       setSourceForm({ ...sourceForm, source_type: t.id });
-                      setConnectionVerified(false);
                     }}
-                    className={`source-type-card ${(sourceForm.source_type || 'API') === t.id ? 'active' : ''}`}
-                    style={{
-                      '--theme-color': t.color,
-                      flex: 1,
-                      position: 'relative',
-                      cursor: 'pointer'
-                    }}
+                    className={`source-type-card-premium ${(sourceForm.source_type || 'API') === t.id ? 'active' : ''}`}
+                    style={{ '--theme-color': t.color }}
                   >
                     <div className="source-type-icon-wrapper">
                       {t.icon}
@@ -424,250 +400,204 @@ export default function StepClient({
                       <div className="source-type-label">{t.label}</div>
                       <div className="source-type-desc">{t.desc}</div>
                     </div>
-                    {(sourceForm.source_type || 'API') === t.id && (
-                      <motion.div
-                        layoutId="active-glow"
-                        className="source-card-glow"
-                        initial={false}
-                        transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
-                      />
-                    )}
                   </motion.div>
                 ))}
               </div>
             </div>
 
-            <div className="register-split-grid">
-              <div className="register-main-side" style={{ width: '100%' }}>
-                <div className="register-field full">
-                  <label>Client Name</label>
-                  <input
-                    value={sourceForm.client_name}
-                    onChange={e => {
-                      setSourceForm({ ...sourceForm, client_name: e.target.value });
-                      setConnectionVerified(false);
-                    }}
-                    placeholder="e.g. AMGEN"
-                  />
-                </div>
-
-                {(sourceForm.source_type === 'API' || !sourceForm.source_type) && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="register-grid">
-                    <div className="register-field">
-                      <label>Source Name</label>
-                      <input
-                        value={sourceForm.source_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, source_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="e.g. disease-api"
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Base URL</label>
-                      <input
-                        value={sourceForm.base_url}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, base_url: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="https://api.example.com"
-                      />
-                    </div>
-                    <div className="register-field full">
-                      <label>Authentication</label>
-                      <FluentSelect
-                        value={sourceForm.auth_type}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, auth_type: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        options={[
-                          { value: 'none', label: '🔓 No auth (public API)' },
-                          { value: 'bearer', label: '🔑 Bearer token' },
-                          { value: 'api_key', label: '🗝️ API key header' },
-                          { value: 'basic', label: '🔒 Basic auth' }
-                        ]}
-                      />
-                    </div>
-                    {sourceForm.auth_type !== 'none' && (
-                      <div className="register-field full">
-                        <label>{sourceForm.auth_type === 'api_key' ? 'API Key' : 'Token / Password'}</label>
-                        <input
-                          type="password"
-                          value={sourceForm.auth_token || ''}
-                          onChange={e => {
-                            setSourceForm({ ...sourceForm, auth_token: e.target.value });
-                            setConnectionVerified(false);
-                          }}
-                          placeholder="Enter credentials..."
-                        />
-                      </div>
-                    )}
-                    <div className="register-field full">
-                      <label>Endpoints (comma-separated)</label>
-                      <input
-                        value={sourceForm.endpoints}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, endpoints: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="users,posts,todos"
-                      />
-                    </div>
-                  </motion.div>
-                )}
-
-                {sourceForm.source_type === 'S3' && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="register-grid">
-                    <div className="register-field">
-                      <label>Source Name</label>
-                      <input
-                        value={sourceForm.source_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, source_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="e.g. s3-bucket"
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Bucket Name</label>
-                      <input
-                        value={sourceForm.bucket_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, bucket_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="e.g. my-data-bucket"
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Region</label>
-                      <FluentSelect
-                        value={sourceForm.region}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, region: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        options={[
-                          { value: 'us-east-1', label: 'us-east-1 (N. Virginia)' },
-                          { value: 'us-east-2', label: 'us-east-2 (Ohio)' },
-                          { value: 'us-west-1', label: 'us-west-1 (California)' },
-                          { value: 'eu-west-1', label: 'eu-west-1 (Ireland)' }
-                        ]}
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Access Key</label>
-                      <input
-                        value={sourceForm.aws_access_key_id}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, aws_access_key_id: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="AKIA..."
-                      />
-                    </div>
-                    <div className="register-field full">
-                      <label>Secret Key</label>
-                      <input
-                        type="password"
-                        value={sourceForm.aws_secret_access_key}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, aws_secret_access_key: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="Secret..."
-                      />
-                    </div>
-                  </motion.div>
-                )}
-
-                {sourceForm.source_type === 'ADLS' && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="register-grid">
-                    <div className="register-field">
-                      <label>Source Name</label>
-                      <input
-                        value={sourceForm.source_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, source_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="e.g. adls-storage"
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Account Name</label>
-                      <input
-                        value={sourceForm.azure_account_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, azure_account_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="mystorageaccount"
-                      />
-                    </div>
-                    <div className="register-field">
-                      <label>Container Name</label>
-                      <input
-                        value={sourceForm.azure_container_name}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, azure_container_name: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="raw-data"
-                      />
-                    </div>
-                    <div className="register-field full">
-                      <label>Account Key</label>
-                      <input
-                        type="password"
-                        value={sourceForm.azure_account_key}
-                        onChange={e => {
-                          setSourceForm({ ...sourceForm, azure_account_key: e.target.value });
-                          setConnectionVerified(false);
-                        }}
-                        placeholder="Azure Key..."
-                      />
-                    </div>
-                  </motion.div>
-                )}
-
-
-
-
-                {sourceForm.source_type === 'LOCAL' && (
-                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ padding: '20px', background: 'var(--blue-bg)', borderRadius: 12, marginTop: 12 }}>
-                    <div style={{ color: 'var(--blue)', fontWeight: 600, fontSize: 14 }}>
-                      💡 For Local sources, just provide the Client Name.
-                    </div>
-                    <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 8 }}>
-                      You will be prompted to upload your files in the next step.
-                    </div>
-                  </motion.div>
-                )}
+            <div className="register-form-grid">
+              <div className="register-field full">
+                <label>Client Name</label>
+                <input
+                  value={sourceForm.client_name}
+                  onChange={e => {
+                    setSourceForm({ ...sourceForm, client_name: e.target.value });
+                    setConnectionVerified(false);
+                  }}
+                  placeholder="e.g. AMGEN"
+                  className="orch-input"
+                />
               </div>
+
+              {(sourceForm.source_type === 'API' || !sourceForm.source_type) && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="api-config-grid">
+                  <div className="register-field">
+                    <label>Source Name</label>
+                    <input
+                      value={sourceForm.source_name}
+                      onChange={e => {
+                        setSourceForm({ ...sourceForm, source_name: e.target.value });
+                        setConnectionVerified(false);
+                      }}
+                      placeholder="e.g. disease-api"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>Base URL</label>
+                    <input
+                      value={sourceForm.base_url}
+                      onChange={e => {
+                        setSourceForm({ ...sourceForm, base_url: e.target.value });
+                        setConnectionVerified(false);
+                      }}
+                      placeholder="https://api.example.com"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field full">
+                    <label>Authentication</label>
+                    <FluentSelect
+                      value={sourceForm.auth_type}
+                      onChange={e => {
+                        setSourceForm({ ...sourceForm, auth_type: e.target.value });
+                        setConnectionVerified(false);
+                      }}
+                      options={[
+                        { value: 'none', label: '🔓 No auth (public API)' },
+                        { value: 'bearer', label: '🔑 Bearer token' },
+                        { value: 'api_key', label: '🗝️ API key header' },
+                        { value: 'basic', label: '🔒 Basic auth' }
+                      ]}
+                    />
+                  </div>
+                  {sourceForm.auth_type !== 'none' && (
+                    <div className="register-field full">
+                      <label>{sourceForm.auth_type === 'api_key' ? 'API Key' : 'Token / Password'}</label>
+                      <input
+                        type="password"
+                        value={sourceForm.auth_token || ''}
+                        onChange={e => {
+                          setSourceForm({ ...sourceForm, auth_token: e.target.value });
+                          setConnectionVerified(false);
+                        }}
+                        placeholder="Enter credentials..."
+                        className="orch-input"
+                      />
+                    </div>
+                  )}
+                  <div className="register-field full">
+                    <label>Endpoints (comma-separated)</label>
+                    <input
+                      value={sourceForm.endpoints}
+                      onChange={e => {
+                        setSourceForm({ ...sourceForm, endpoints: e.target.value });
+                        setConnectionVerified(false);
+                      }}
+                      placeholder="users,posts,todos"
+                      className="orch-input"
+                    />
+                  </div>
+                </motion.div>
+              )}
+
+              {sourceForm.source_type === 'S3' && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="api-config-grid">
+                  <div className="register-field">
+                    <label>Source Name</label>
+                    <input
+                      value={sourceForm.source_name}
+                      onChange={e => setSourceForm({ ...sourceForm, source_name: e.target.value })}
+                      placeholder="e.g. clinical-data-s3"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>AWS Region</label>
+                    <input
+                      value={sourceForm.region}
+                      onChange={e => setSourceForm({ ...sourceForm, region: e.target.value })}
+                      placeholder="us-east-1"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>S3 Bucket Name</label>
+                    <input
+                      value={sourceForm.bucket_name}
+                      onChange={e => setSourceForm({ ...sourceForm, bucket_name: e.target.value })}
+                      placeholder="my-data-bucket"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>Access Key ID</label>
+                    <input
+                      value={sourceForm.aws_access_key_id}
+                      onChange={e => setSourceForm({ ...sourceForm, aws_access_key_id: e.target.value })}
+                      placeholder="AKIA..."
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field full">
+                    <label>Secret Access Key</label>
+                    <input
+                      type="password"
+                      value={sourceForm.aws_secret_access_key}
+                      onChange={e => setSourceForm({ ...sourceForm, aws_secret_access_key: e.target.value })}
+                      placeholder="Secret Key"
+                      className="orch-input"
+                    />
+                  </div>
+                </motion.div>
+              )}
+
+              {sourceForm.source_type === 'ADLS' && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="api-config-grid">
+                  <div className="register-field">
+                    <label>Source Name</label>
+                    <input
+                      value={sourceForm.source_name}
+                      onChange={e => setSourceForm({ ...sourceForm, source_name: e.target.value })}
+                      placeholder="e.g. adls-raw-zone"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>Account Name</label>
+                    <input
+                      value={sourceForm.azure_account_name}
+                      onChange={e => setSourceForm({ ...sourceForm, azure_account_name: e.target.value })}
+                      placeholder="mystorageaccount"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field">
+                    <label>Container Name</label>
+                    <input
+                      value={sourceForm.azure_container_name}
+                      onChange={e => setSourceForm({ ...sourceForm, azure_container_name: e.target.value })}
+                      placeholder="raw-data"
+                      className="orch-input"
+                    />
+                  </div>
+                  <div className="register-field full">
+                    <label>Account Key</label>
+                    <input
+                      type="password"
+                      value={sourceForm.azure_account_key}
+                      onChange={e => setSourceForm({ ...sourceForm, azure_account_key: e.target.value })}
+                      placeholder="Account Key"
+                      className="orch-input"
+                    />
+                  </div>
+                </motion.div>
+              )}
+
+              {sourceForm.source_type === 'LOCAL' && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="local-info-box">
+                  <FiUploadCloud size={24} color="var(--blue)" />
+                  <div className="info-content">
+                    <div className="info-title">Local Files Selection</div>
+                    <div className="info-sub">Provide the Client Name above, then click "Continue to Upload" to open the secure upload portal.</div>
+                  </div>
+                </motion.div>
+              )}
             </div>
 
             {testResult && (
-              <div style={{
-                marginTop: 12,
-                padding: '14px 20px',
-                borderRadius: 14,
-                fontSize: 13,
-                fontWeight: 600,
-                border: '1px solid',
-                background: testResult.type === 'success' ? 'var(--green-bg)' : 'var(--red-bg)',
-                borderColor: testResult.type === 'success' ? 'var(--green-bdr)' : 'var(--red-bdr)',
-                color: testResult.type === 'success' ? 'var(--green)' : 'var(--red)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12
-              }}>
-                <div style={{ fontSize: 20 }}>{testResult.type === 'success' ? '✅' : '❌'}</div>
-                <div>{testResult.message}</div>
+              <div className={`test-result-box ${testResult.type}`}>
+                {testResult.type === 'success' ? '✅' : '❌'} {testResult.message}
               </div>
             )}
 
@@ -677,81 +607,71 @@ export default function StepClient({
                   className="orch-btn ghost"
                   onClick={testConnection}
                   disabled={testingConnection || !sourceForm.client_name || !sourceForm.source_name}
-                  style={{ flex: 1 }}
                 >
                   {testingConnection ? 'Testing...' : '⚡ Test Connection'}
                 </button>
               )}
 
               <button
-                  className={`orch-btn primary premium-btn ${(connectionVerified || sourceForm.source_type === 'LOCAL' || apiCanSkipConnection) ? '' : 'disabled-btn'}`}
-                  onClick={() => {
-                    if (sourceForm.source_type === 'LOCAL') {
-                      setSelectedClient(sourceForm.client_name);
-                      toast('Client set. Please upload files in the next step.', 'success');
-                      onNext();
-                    } else {
-                      if (!connectionVerified && !apiCanSkipConnection) {
-                        toast('Please test and verify connection before registration', 'warning');
-                        return;
-                      }
-                      registerSource();
-                    }
-                  }}
-                  disabled={savingSource || !sourceForm.client_name || (sourceForm.source_type !== 'LOCAL' && (!sourceForm.source_name || (!connectionVerified && !apiCanSkipConnection)))}
-                  style={{ flex: sourceForm.source_type !== 'LOCAL' ? 1.5 : 1 }}
-                >
-                  {savingSource ? 'Registering...' :
-                    sourceForm.source_type === 'LOCAL' ? 'Continue to Upload →' :
-                      `🚀 Register ${sourceForm.source_type || 'API'} Source`}
-                </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {tab === 'target' && (
-        <div className="step-body">
-          <div className="target-setup-header" style={{ marginBottom: 24 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-              <div style={{ padding: '2px 10px', background: 'var(--blue-bg)', color: 'var(--blue)', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
-                Selected Client: {selectedClient}
-              </div>
-            </div>
-            <h3 style={{ margin: 0, fontSize: 20, fontWeight: 900 }}>DEA Agent — Target Setup</h3>
-            <p style={{ margin: '4px 0 0', opacity: 0.7, fontSize: 13 }}>Configure destination systems for the selected client.</p>
-          </div>
-
-          <div className="target-form-container" style={{ background: 'var(--surface2)', borderRadius: 20, padding: 24, border: '1px solid var(--border)' }}>
-            <div className="register-field full" style={{ marginBottom: 24 }}>
-              <label>SELECT TARGET TYPE</label>
-              <FluentSelect
-                value={targetType}
-                onChange={(e) => {
-                  setTargetType(e.target.value);
-                  setTargetFields({});
-                  setTargetTestResult(null);
+                className={`orch-btn primary premium-btn ${canRegister() ? '' : 'disabled-btn'}`}
+                onClick={() => {
+                  if (sourceForm.source_type === 'LOCAL') {
+                    setSelectedClient(sourceForm.client_name);
+                    setShowUploadModal(true);
+                  } else {
+                    registerSource();
+                  }
                 }}
-                options={TARGET_TYPES.map(t => ({ value: t, label: t }))}
-              />
+                disabled={savingSource || !canRegister()}
+              >
+                {savingSource ? 'Registering...' :
+                  sourceForm.source_type === 'LOCAL' ? 'Continue to Upload →' :
+                    `🚀 Register Source`}
+              </button>
+            </div>
+          </div>
+        )}
+
+
+        {tab === 'target' && (
+          <div className="target-config-container">
+            <div className="target-config-header">
+              <div className="client-badge">Selected: {selectedClient}</div>
+              <h3 className="target-title">Target System Setup</h3>
+              <p className="target-sub">Configure destination systems for data extraction.</p>
             </div>
 
-            {targetType === 'None' ? (
-              <div style={{ padding: '20px', background: 'var(--blue-bg)', borderRadius: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
-                <FiInfo size={20} color="var(--blue)" />
-                <div style={{ fontSize: 14, color: 'var(--blue)', fontWeight: 600 }}>
-                  No target configured. Intelligence will continue using source-only context.
-                </div>
+            <div className="target-form-wrapper">
+              <div className="register-field full">
+                <label>TARGET TYPE</label>
+                <FluentSelect
+                  value={targetType}
+                  onChange={(e) => {
+                    setTargetType(e.target.value);
+                    setTargetFields({});
+                    setTargetTestResult(null);
+                  }}
+                  options={TARGET_TYPES.map(t => ({ value: t, label: t }))}
+                />
               </div>
-            ) : (
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="target-dynamic-fields">
-                <div className="register-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+
+              {targetType === 'None' ? (
+                <div className="local-info-box">
+                  <FiInfo size={20} color="var(--blue)" />
+                  <div className="info-content">
+                    <div className="info-title">No Target Selected</div>
+                    <div className="info-sub">Intelligence will continue using source-only context.</div>
+                  </div>
+                </div>
+              ) : (
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="target-fields-grid">
                   <div className="register-field full">
                     <label>Target Name</label>
                     <input 
                       value={targetFields["target_name"] || ''} 
                       onChange={(e) => setTargetFields({...targetFields, target_name: e.target.value})}
                       placeholder="e.g. Fabric_Warehouse_Gold"
+                      className="orch-input"
                     />
                   </div>
                   {TARGET_FIELD_MAP[targetType].map(field => (
@@ -767,181 +687,110 @@ export default function StepClient({
                             { value: 'Upsert', label: 'Upsert' }
                           ]}
                         />
-                      ) : field === 'Auth Type' || field === 'API Type' || field === 'SSL Mode' || field === 'File Format' || field === 'Compression' ? (
-                        <input 
-                          value={targetFields[field] || ''} 
-                          onChange={(e) => setTargetFields({...targetFields, [field]: e.target.value})}
-                          placeholder={`Enter ${field}...`}
-                        />
-                      ) : field === 'Encrypt Toggle' || field === 'Header Toggle' || field === 'Pretty Print Toggle' || field === 'SSL' ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 44 }}>
-                          <input 
-                            type="checkbox" 
-                            checked={!!targetFields[field]} 
-                            onChange={(e) => setTargetFields({...targetFields, [field]: e.target.checked})}
-                            style={{ width: 20, height: 20 }}
-                          />
-                          <span style={{ fontSize: 13, fontWeight: 500 }}>Enabled</span>
-                        </div>
                       ) : (
                         <input 
                           type={field.includes('Password') || field.includes('Key') || field.includes('Token') ? 'password' : 'text'}
                           value={targetFields[field] || ''} 
                           onChange={(e) => setTargetFields({...targetFields, [field]: e.target.value})}
                           placeholder={field}
+                          className="orch-input"
                         />
                       )}
                     </div>
                   ))}
+                </motion.div>
+              )}
+
+              {targetTestResult && (
+                <div className={`test-result-box ${targetTestResult.type}`}>
+                  {targetTestResult.type === 'success' ? '✅' : '❌'} {targetTestResult.message}
                 </div>
-              </motion.div>
-            )}
+              )}
 
-            {targetTestResult && (
-              <div style={{
-                marginTop: 20,
-                padding: '14px 20px',
-                borderRadius: 14,
-                fontSize: 13,
-                fontWeight: 600,
-                border: '1px solid',
-                background: targetTestResult.type === 'success' ? 'var(--green-bg)' : 'var(--red-bg)',
-                borderColor: targetTestResult.type === 'success' ? 'var(--green-bdr)' : 'var(--red-bdr)',
-                color: targetTestResult.type === 'success' ? 'var(--green)' : 'var(--red)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12
-              }}>
-                <div style={{ fontSize: 20 }}>{targetTestResult.type === 'success' ? '✅' : '❌'}</div>
-                <div>{targetTestResult.message}</div>
-              </div>
-            )}
-
-            <div className="target-actions" style={{ marginTop: 32, display: 'flex', gap: 12 }}>
-              {targetType !== 'None' && (
-                <>
-                  <button 
-                    className="orch-btn ghost" 
+              <div className="register-actions">
+                {targetType !== 'None' && (
+                  <button
+                    className="orch-btn ghost"
                     onClick={handleTestTarget}
                     disabled={testingTarget}
-                    style={{ flex: 1, height: 48 }}
                   >
-                    {testingTarget ? 'Testing...' : '⚡ Test Connection'}
+                    {testingTarget ? 'Testing...' : '⚡ Test Target'}
                   </button>
-                  <button 
-                    className="orch-btn secondary" 
-                    onClick={handleRegisterTarget}
-                    disabled={registeringTarget}
-                    style={{ flex: 1, height: 48 }}
-                  >
-                    {registeringTarget ? 'Registering...' : '💾 Register Target'}
-                  </button>
-                </>
-              )}
-              <button 
-                className="orch-btn primary premium-btn" 
-                onClick={onNext}
-                style={{ flex: 2, height: 48 }}
-              >
-                Continue to Intelligence →
-              </button>
+                )}
+
+                <button
+                  className="orch-btn primary premium-btn"
+                  onClick={handleRegisterTarget}
+                  disabled={registeringTarget || targetType === 'None'}
+                >
+                  {registeringTarget ? 'Saving...' : '💾 Save Target'}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Portal Confirmation Modal */}
-      {showDeleteConfirm && createPortal(
-        <div className="mode-modal-overlay" style={{ zIndex: 1200 }}>
+      {/* Main Footer for Step 1 */}
+      <AnimatePresence>
+        {selectedClient && tab !== 'register' && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1, transition: { type: "spring", damping: 25, stiffness: 300 } }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="mode-modal-card"
-            style={{ width: 440, padding: 0, overflow: 'hidden' }}
+            initial={{ opacity: 0, scale: 0.98, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.98, y: 10 }}
+            className="step-footer-actions-container"
           >
-            <div className="confirmation-header" style={{ padding: '24px 32px 16px', background: 'var(--surface2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <FiAlertTriangle size={20} />
-                </div>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>Confirm Deletion</h3>
-              </div>
-              <button
-                className="orch-btn ghost tiny"
-                onClick={() => setShowDeleteConfirm(false)}
-                style={{ borderRadius: '50%', width: 32, height: 32, padding: 0 }}
-              >
-                <FiX />
-              </button>
+            <div className="selected-info">
+              Ready to proceed with: <strong>{selectedClient}</strong>
             </div>
-
-            <div className="confirmation-body" style={{ padding: '24px 32px' }}>
-              <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text1)' }}>Are you sure you want to delete client <strong>"{clientToDelete}"</strong>?</p>
-              <p style={{ marginTop: 12, fontSize: 13, color: 'var(--text3)', lineHeight: 1.6 }}>
-                This action will permanently remove ALL associated sources, datasets, and execution history. <strong style={{ color: '#ef4444' }}>This cannot be undone.</strong>
-              </p>
-            </div>
-
-            <div className="confirmation-footer" style={{ padding: '20px 32px', background: 'var(--surface2)', display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-              <button
-                className="orch-btn ghost"
-                onClick={() => setShowDeleteConfirm(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="orch-btn primary"
-                onClick={handleConfirmDelete}
-                style={{ background: '#ef4444', color: '#fff', border: 'none', fontWeight: 800 }}
-              >
-                <FiTrash2 style={{ marginRight: 8 }} /> Delete Client
-              </button>
-            </div>
+            <button
+              className="orch-btn primary premium-btn"
+              onClick={onNext}
+            >
+              Continue <FiChevronRight />
+            </button>
           </motion.div>
-        </div>,
-        document.body
-      )}
+        )}
+      </AnimatePresence>
 
-      {/* Delete Target Confirmation Modal */}
-      {showDeleteTargetConfirm && createPortal(
-        <div className="mode-modal-overlay" style={{ zIndex: 1200 }}>
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
-            className="mode-modal-card"
-            style={{ width: 440, padding: 0, overflow: 'hidden' }}
-          >
-            <div className="confirmation-header" style={{ padding: '24px 32px 16px', background: 'var(--surface2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <FiAlertTriangle size={20} />
-                </div>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>Delete Target</h3>
+      {/* Delete Modals */}
+      <AnimatePresence>
+        {showDeleteConfirm && (
+          <div className="pi-modal-overlay">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="pi-modal-content" style={{ maxWidth: 400 }}>
+              <div className="pi-modal-header">
+                <h3>Delete Client</h3>
+                <button className="pi-modal-close" onClick={() => setShowDeleteConfirm(false)}><FiX /></button>
               </div>
-              <button
-                className="orch-btn ghost tiny"
-                onClick={() => setShowDeleteTargetConfirm(false)}
-                style={{ borderRadius: '50%', width: 32, height: 32, padding: 0 }}
-              >
-                <FiX />
-              </button>
-            </div>
-
-            <div className="confirmation-body" style={{ padding: '24px 32px' }}>
-              <p style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Are you sure you want to delete target <strong>"{targetToDelete?.target_name}"</strong>?</p>
-              <p style={{ marginTop: 12, fontSize: 13, color: 'var(--text3)' }}>This action cannot be undone.</p>
-            </div>
-
-            <div className="confirmation-footer" style={{ padding: '20px 32px', background: 'var(--surface2)', display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-              <button className="orch-btn ghost" onClick={() => setShowDeleteTargetConfirm(false)}>Cancel</button>
-              <button className="orch-btn primary" onClick={handleConfirmDeleteTarget} style={{ background: '#ef4444', border: 'none' }}>Delete Target</button>
-            </div>
-          </motion.div>
-        </div>,
-        document.body
-      )}
+              <div className="pi-modal-body">
+                <p>Are you sure you want to delete client <strong>{clientToDelete}</strong>? This action cannot be undone.</p>
+              </div>
+              <div className="pi-modal-footer">
+                <button className="orch-btn ghost" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
+                <button className="orch-btn primary" onClick={handleConfirmDelete} style={{ background: 'var(--red)' }}>Delete</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+        
+        {showDeleteTargetConfirm && (
+          <div className="pi-modal-overlay">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="pi-modal-content" style={{ maxWidth: 400 }}>
+              <div className="pi-modal-header">
+                <h3>Delete Target</h3>
+                <button className="pi-modal-close" onClick={() => setShowDeleteTargetConfirm(false)}><FiX /></button>
+              </div>
+              <div className="pi-modal-body">
+                <p>Are you sure you want to delete target <strong>{targetToDelete?.target_name}</strong>?</p>
+              </div>
+              <div className="pi-modal-footer">
+                <button className="orch-btn ghost" onClick={() => setShowDeleteTargetConfirm(false)}>Cancel</button>
+                <button className="orch-btn primary" onClick={handleConfirmDeleteTarget} style={{ background: 'var(--red)' }}>Delete</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

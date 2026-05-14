@@ -21,5 +21,6 @@ class MasterConfigAuthoritative(Base):
     watermark_column = Column(String(255), nullable=True)
     partition_column = Column(String(255), nullable=True)
     last_seen_batch = Column(String(255), nullable=True)
+    staging_table = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

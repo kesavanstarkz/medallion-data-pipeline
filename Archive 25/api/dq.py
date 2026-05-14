@@ -456,7 +456,6 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
         sources = db.query(APISourceConfig).filter(APISourceConfig.client_name == request.client_name).all()
         
         # Check for Fabric Runtime rows in DB as a backup discovery source
-        from models.master_config import MasterConfigAuthoritative
         fabric_runtime_rows = db.query(MasterConfigAuthoritative).filter(
             MasterConfigAuthoritative.client_name == request.client_name,
             MasterConfigAuthoritative.source_type.in_(["FABRIC", "FABRIC_RUNTIME"])
@@ -492,7 +491,6 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
                 "partition_column": fr.partition_column or ""
             })
         
-        all_discovered = []
         for s in sources:
             try:
                 # If it's a bucket, the folder_path we use for discovery is the bucket name or a root-level Scan
@@ -575,6 +573,7 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
             "target_layer_bronze": str(row.get("target_layer_bronze")).strip() if pd.notna(row.get("target_layer_bronze")) else None,
             "target_layer_silver": str(row.get("target_layer_silver")).strip() if pd.notna(row.get("target_layer_silver")) else None,
             "last_seen_batch": str(row.get("batch_id")).strip() if pd.notna(row.get("batch_id")) and "batch_id" in df.columns else None,
+            "staging_table": str(row.get("staging_table")).strip() if pd.notna(row.get("staging_table")) else None,
         }
 
         csv_load_type = str(row.get("load_type")).strip() if pd.notna(row.get("load_type")) else ""
@@ -668,14 +667,23 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
 
     raw_layer_path = getattr(mc, "raw_layer_path", None) if mc else (str(row.iloc[0].get("raw_layer_path")) if pd.notna(row.iloc[0].get("raw_layer_path")) else None)
 
-    if raw_layer_path:
+    from api.orchestrate import _canonical_source_type
+    can_src = _canonical_source_type(source_type)
+
+    if can_src == "FABRIC":
+        # For Fabric, canonical is the staging table name
+        canonical = getattr(mc, "staging_table", None) or (str(row.iloc[0].get("staging_table")) if 'row' in locals() and pd.notna(row.iloc[0].get("staging_table")) else None)
+        if not canonical:
+            # Fallback to source_object or object name if it looks like a table
+            canonical = source_object
+    elif raw_layer_path:
         canonical = raw_layer_path.strip("/")
-    elif source_folder.startswith("az://") or source_folder.startswith("s3://"):
+    elif source_folder and (source_folder.startswith("az://") or source_folder.startswith("s3://")):
         canonical = f"{source_folder.rstrip('/')}/{source_object}"
     else:
-        canonical = f"{source_folder.strip('/')}/{source_object}".strip("/")
+        canonical = f"{(source_folder or '').strip('/')}/{source_object}".strip("/")
     try:
-        connector = get_mcp_connector(source_type)
+        connector = get_mcp_connector(can_src or source_type)
         content = connector.get_file_content(canonical, resolved_client)
     except Exception as e:
         logger.error(f"MCP content read failed for {canonical}: {e}")

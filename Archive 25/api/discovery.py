@@ -23,6 +23,11 @@ from services.fabric.universal_preview_service import FabricSparkPreviewService
 from models.api_source_config import APISourceConfig
 from models.master_config_authoritative import MasterConfigAuthoritative
 from models.master_config import MasterConfig
+from core.settings import settings
+import psycopg2
+from core.mcp_connector import get_mcp_connector
+from core.azure_storage import get_storage_client
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -1157,3 +1162,53 @@ def run_api_scan(request: ApiScanRequest):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+class FabricRuntimePromoteRequest(BaseModel):
+    client_name: str
+    pipeline_name: str
+    staging_table: str
+    file_format: Optional[str] = "CSV"
+
+@router.post("/fabric-runtime-promote-v2")
+async def promote_fabric_runtime_to_adls(request: FabricRuntimePromoteRequest):
+    """
+    Exports staged NeonDB data to ADLS and returns the ADLS source metadata.
+    """
+    if not request.staging_table:
+        raise HTTPException(status_code=400, detail="staging_table is required")
+        
+    try:
+        # 1. Read directly from NeonDB staging table (Intermediate Staging)
+        # The preview data was already extracted and staged in NeonDB by the preview step.
+        conn = psycopg2.connect(settings.NEON_DB_URL)
+        df = pd.read_sql(f"SELECT * FROM {request.staging_table}", conn)
+        conn.close()
+        
+        if df is None or df.empty:
+            raise HTTPException(status_code=400, detail="Extracted dataset is empty or not found in NeonDB.")
+            
+        # 2. Export to ADLS
+        storage = get_storage_client()
+        clean_pipeline = request.pipeline_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
+        folder_path = f"runtime_pipeline_sources/{request.client_name}/{clean_pipeline}"
+        file_name = "source_export.csv"
+        full_key = f"{folder_path}/{file_name}"
+        
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        storage.put_object(Key=full_key, Body=csv_buffer.getvalue().encode('utf-8'))
+        
+        # 3. Return ADLS metadata - this allows the UI to pivot to a standard ADLS orchestration
+        return {
+            "status": "SUCCESS",
+            "source_type": "ADLS",
+            "source_path": f"az://{storage.default_container}/{full_key}",
+            "folder_path": f"az://{storage.default_container}/{folder_path}",
+            "source_object": file_name,
+            "file_name": file_name,
+            "file_format": "CSV",
+            "total_rows": len(df)
+        }
+    except Exception as e:
+        logger.error(f"Promotion to ADLS failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Promotion failed [V4_DIRECT]: {str(e)}")

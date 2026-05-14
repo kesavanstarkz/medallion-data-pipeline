@@ -61,50 +61,18 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
       exit={{ opacity: 0, x: -20 }}
       className="orch-step-panel"
     >
-      <div
-        className="step-header"
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 24,
-          paddingBottom: 24,
-          borderBottom: '1px solid rgba(0,0,0,0.05)',
-        }}
-      >
-        <div style={{ flex: 1 }}>
-          <h2
-            className="step-title"
-            style={{
-              margin: 0,
-              fontSize: 24,
-              fontWeight: 900,
-              background: 'linear-gradient(90deg, var(--text1), var(--text2))',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-            }}
-          >
-            Select Execution Platform
-          </h2>
-          <p
-            className="step-sub"
-            style={{ margin: '4px 0 0', opacity: 0.8, fontSize: 13, fontWeight: 500 }}
-          >
+      <div className="step-header-responsive">
+        <div className="step-header-text">
+          <h2 className="step-title">Select Execution Platform</h2>
+          <p className="step-sub">
             Choose the hyperscaler or platform where your pipelines run. This determines discovery agents, deployment targets, and available integrations.
           </p>
         </div>
-        <img src={logo} alt="Agilisium" style={{ height: 28, objectFit: 'contain' }} />
+        <img src={logo} alt="Agilisium" className="step-header-logo" />
       </div>
 
       <div className="step-body">
-        <div
-          className="platform-grid"
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-            gap: 20,
-          }}
-        >
+        <div className="platform-grid">
           {PLATFORMS.map((p, i) => (
             <motion.div
               key={p.id}
@@ -115,20 +83,10 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
               whileHover={{ y: -6, scale: 1.02, transition: { duration: 0.2 } }}
               whileTap={{ scale: 0.98 }}
               onClick={() => setSelectedPlatform(p.id)}
+              className={`platform-selection-card ${selectedPlatform === p.id ? 'selected' : ''}`}
               style={{
-                position: 'relative',
-                cursor: 'pointer',
-                padding: 28,
-                borderRadius: 20,
-                background: selectedPlatform === p.id
-                  ? `linear-gradient(135deg, ${p.color}08 0%, ${p.color}15 100%)`
-                  : 'rgba(255,255,255,0.6)',
-                border: `2px solid ${selectedPlatform === p.id ? p.color : 'rgba(0,0,0,0.06)'}`,
-                boxShadow: selectedPlatform === p.id
-                  ? `0 8px 32px ${p.color}20, 0 2px 8px rgba(0,0,0,0.04)`
-                  : '0 2px 12px rgba(0,0,0,0.03)',
-                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                overflow: 'hidden',
+                '--p-color': p.color,
+                '--p-gradient': p.gradient,
               }}
             >
               {/* Selection indicator */}
@@ -136,20 +94,8 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
                 <motion.div
                   initial={{ scale: 0 }}
                   animate={{ scale: 1 }}
-                  style={{
-                    position: 'absolute',
-                    top: 14,
-                    right: 14,
-                    width: 28,
-                    height: 28,
-                    borderRadius: '50%',
-                    background: p.gradient,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: '#fff',
-                    boxShadow: `0 4px 12px ${p.color}40`,
-                  }}
+                  className="selection-indicator"
+                  style={{ background: p.gradient, boxShadow: `0 4px 12px ${p.color}40` }}
                 >
                   <FiCheck size={14} />
                 </motion.div>
@@ -157,62 +103,34 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
 
               {/* Icon */}
               <div
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 16,
-                  background: p.gradient,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: '#fff',
-                  fontSize: 24,
-                  marginBottom: 18,
-                  boxShadow: `0 6px 20px ${p.color}30`,
-                }}
+                className="platform-icon-box"
+                style={{ background: p.gradient, boxShadow: `0 6px 20px ${p.color}30` }}
               >
                 {p.icon}
               </div>
 
               {/* Label */}
               <div
-                style={{
-                  fontSize: 18,
-                  fontWeight: 800,
-                  color: selectedPlatform === p.id ? p.color : 'var(--text1)',
-                  marginBottom: 6,
-                  transition: 'color 0.2s',
-                }}
+                className="platform-label"
+                style={{ color: selectedPlatform === p.id ? p.color : 'var(--text1)' }}
               >
                 {p.label}
               </div>
 
               {/* Description */}
-              <div
-                style={{
-                  fontSize: 13,
-                  color: 'var(--text3)',
-                  marginBottom: 16,
-                  fontWeight: 500,
-                }}
-              >
+              <div className="platform-desc">
                 {p.desc}
               </div>
 
               {/* Feature pills */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <div className="platform-features">
                 {p.features.map((f) => (
                   <span
                     key={f}
+                    className="feature-pill"
                     style={{
-                      fontSize: 10,
-                      fontWeight: 700,
-                      padding: '4px 10px',
-                      borderRadius: 20,
                       background: selectedPlatform === p.id ? `${p.color}15` : 'var(--surface2)',
                       color: selectedPlatform === p.id ? p.color : 'var(--text3)',
-                      transition: 'all 0.2s',
-                      letterSpacing: '0.02em',
                     }}
                   >
                     {f}
@@ -232,20 +150,8 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 10 }}
             className="step-footer-actions-container"
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginTop: 32,
-              padding: '20px 24px',
-              background: 'rgba(255, 255, 255, 0.4)',
-              backdropFilter: 'blur(10px)',
-              borderRadius: 20,
-              border: '1px solid rgba(255, 255, 255, 0.5)',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.04)',
-            }}
           >
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text2)' }}>
+            <div className="selected-info">
               Selected: <strong style={{ color: PLATFORMS.find((p) => p.id === selectedPlatform)?.color }}>
                 {PLATFORMS.find((p) => p.id === selectedPlatform)?.label}
               </strong>
@@ -253,7 +159,6 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
             <button
               className="orch-btn primary premium-btn"
               onClick={onNext}
-              style={{ height: 48, padding: '0 32px', fontSize: '15px', display: 'flex', alignItems: 'center', gap: 8 }}
             >
               Continue <FiChevronRight />
             </button>

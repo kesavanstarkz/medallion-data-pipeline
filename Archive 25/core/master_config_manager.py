@@ -26,6 +26,7 @@ MASTER_CONFIG_COLUMNS = [
     "target_layer_bronze",
     "target_layer_silver",
     "is_active",
+    "staging_table",
     "created_at",
     # Human-filled (reserved)
     "load_type",

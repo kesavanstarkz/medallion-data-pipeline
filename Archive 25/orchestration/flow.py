@@ -33,7 +33,9 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 from loguru import logger
 import time
-import time
+import json
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 class MockDataset:
     def __init__(self, d, client, src):
@@ -172,6 +174,14 @@ def _discover(state: Dict) -> Dict:
     
     # If LOCAL/S3 and no DB, we just return empty
     logger.warning(f"No datasets found in DB for {src} client {client}")
+    
+    # FABRIC specific: If no datasets found, but it's FABRIC, we might be using a dynamic staging table
+    if src == "AZURE":
+        src = "ADLS"
+    elif src == "FABRIC":
+        src = "FABRIC"
+        return {**state, "datasets": [MockDataset({"dataset_name": "fabric_extracted.csv", "source_object": "fabric_extracted.csv", "source_folder": folder}, client, src)], "progress": {}}
+
     return {**state, "datasets": [], "progress": {}}
 
 @observe()
@@ -215,6 +225,75 @@ def _land(state: Dict) -> Dict:
                 })
         logger.info(f"Datasets already landed (DB/Direct sourced) for {client}")
         return {**state, "batch_id": batch_id, "landed": prepared, "success": success, "failed": []}
+
+    if src == "FABRIC":
+        for ds in state.get("datasets", []):
+            try:
+                # 1. Find staging table from Master Config or state
+                # 1. Find staging table - Priority: State -> Master Config
+                staging_table = state.get("staging_table")
+                
+                if not staging_table:
+                    from sqlalchemy.orm import Session
+                    db = SessionLocal()
+                    from models.master_config_authoritative import MasterConfigAuthoritative
+                    mc = db.query(MasterConfigAuthoritative).filter(
+                        MasterConfigAuthoritative.client_name == client,
+                        MasterConfigAuthoritative.source_type == "FABRIC"
+                    ).first()
+                    if mc and hasattr(mc, "staging_table") and mc.staging_table:
+                        staging_table = mc.staging_table
+                    db.close()
+                
+                if not staging_table:
+                    # Fallback to naming convention if possible
+                    staging_table = folder # We passed staging_table as folder/endpoint in StepSources
+                
+                logger.info(f"Landing FABRIC data from Neon table: {staging_table}")
+                
+                # 2. Query Neon
+                conn = psycopg2.connect(settings.NEON_DB_URL)
+                cur = conn.cursor(cursor_factory=RealDictCursor)
+                cur.execute(f"SELECT * FROM {staging_table}")
+                rows = cur.fetchall()
+                conn.close()
+                
+                if not rows:
+                    raise RuntimeError(f"Staging table {staging_table} is empty or missing.")
+                
+                # 3. Convert to CSV
+                df = pd.DataFrame([dict(r) for r in rows])
+                csv_buf = io.BytesIO()
+                df.to_csv(csv_buf, index=False)
+                content = csv_buf.getvalue()
+                
+                # 4. Upload to Raw
+                raw_key = f"Raw/{client}/{batch_id}/fabric/{ds.file_name}"
+                s3 = get_storage_client()
+                s3.put_object(Container=bucket, Key=raw_key, Body=content)
+                
+                dsid = generate_dataset_id(client, src, ds.file_path)
+                prepared.append({
+                    "dataset_id": dsid,
+                    "file_path": ds.file_path, 
+                    "file_name": ds.file_name, 
+                    "file_format": "CSV", 
+                    "client_name": client, 
+                    "source_type": src, 
+                    "raw_layer_path": f"az://{bucket}/{raw_key}", 
+                    "content": content
+                })
+                success.append(ds)
+                if dsid not in prog:
+                    prog[dsid] = {"dataset_id": dsid, "steps": {}}
+                prog[dsid]["steps"]["Validation"] = {"status": "PASSED", "detail": f"Extracted {len(rows)} rows from Fabric staging."}
+                prog[dsid]["steps"]["Raw Layer"] = {"status": "PASSED", "detail": f"Landed to Raw: az://{bucket}/{raw_key}"}
+                
+            except Exception as e:
+                logger.error(f"Fabric landing failed: {e}")
+                failed.append({"file": ds.file_name, "reason": str(e)})
+        
+        return {**state, "batch_id": batch_id, "landed": prepared, "success": success, "failed": failed}
 
     s3 = get_storage_client()
     connector = get_mcp_connector(src)
