@@ -737,6 +737,9 @@ export default function PipelineIntelligence({
         source_object: finalFileName,
         staging_table: stagingTable,
         pipeline_name: selectedPipeline?.name || data?.reformatted_config?.pipeline_name,
+        source: {
+          artifact_id: selectedPipeline?.id || connection.artifact_id,
+        },
         runtime_ingestion_config: discovery.ingestion_config,
         file_types: sourceFormat
       },
@@ -775,6 +778,7 @@ export default function PipelineIntelligence({
             source_connection: {
               ...runtimeSourceConnection,
               workspace_id: artifactWorkspaceId || activeWorkspaceId,
+              artifact_id: selectedPipeline?.id || runtimeSourceConnection.artifact_id,
             },
           },
         }),

@@ -34,6 +34,7 @@ export default function StepSources({
   fabricMode = 'DISCOVERY',
   setPipelineDeployed,
   selectedPlatform = '',
+  folderPath = '',
 }) {
   const [localFiles, setLocalFiles] = useState([]);
   const [localFilesLoading, setLocalFilesLoading] = useState(false);
@@ -61,8 +62,11 @@ export default function StepSources({
   useEffect(() => {
     if (sourceType === 'FABRIC') {
       setActiveTab('FABRIC');
+    } else if (sourceType === 'ADLS' && folderPath) {
+      setActiveTab('ADLS');
+      setSelectedADLSPath(folderPath);
     }
-  }, [sourceType]);
+  }, [sourceType, folderPath]);
 
   const selectedSources = useMemo(() => [
     ...selectedLocalFiles.map((datasetId) => {

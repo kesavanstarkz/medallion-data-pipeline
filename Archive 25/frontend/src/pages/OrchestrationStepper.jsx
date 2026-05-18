@@ -1154,6 +1154,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     sourceType={sourceType}
                     setSourceType={setSourceType}
                     setFolderPath={setFolderPath}
+                    folderPath={folderPath}
                     setShowUploadModal={setShowUploadModal}
                     openExplorer={openExplorer}
                     call={call}

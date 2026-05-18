@@ -628,6 +628,17 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
         logger.error(f"DB commit failed during sync: {e}")
         raise HTTPException(status_code=500, detail=f"DB commit failed: {e}")
     
+    # Hard Sync: Collect all dataset_ids from CSV to deactivate stale DB records
+    active_dsids = set(df["dataset_id"].astype(str).str.strip().tolist())
+    
+    # Deactivate records in DB that are not in CSV for this client
+    db.query(MasterConfigAuthoritative).filter(
+        MasterConfigAuthoritative.client_name == request.client_name,
+        ~MasterConfigAuthoritative.dataset_id.in_(list(active_dsids))
+    ).update({"is_active": False, "updated_at": datetime.utcnow()}, synchronize_session=False)
+    
+    db.commit()
+    
     logger.info(f"Sync completed for {request.client_name}: inserts={inserts}, updates={updates}, skips={skips}")
     return {"status": "SUCCESS", "client_name": request.client_name, "inserts": inserts, "updates": updates, "skips": skips}
 

@@ -101,11 +101,12 @@ def _runtime_source_path(source_connection: Dict[str, Any]) -> str:
 
 
 def _runtime_dataset_name(source_connection: Dict[str, Any]) -> str:
+    # Prioritize actual file names over artifact IDs (which are often pipeline names)
     return (
         source_connection.get("file_name")
-        or source_connection.get("folder_path")
+        or source_connection.get("source_object")
         or source_connection.get("artifact_id")
-        or "fabric_runtime_source"
+        or "source_export.csv"
     )
 
 

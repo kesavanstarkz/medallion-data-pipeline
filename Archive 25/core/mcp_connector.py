@@ -297,10 +297,25 @@ class S3Connector(MCPSourceConnector):
             
             resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
             datasets = []
+            
+            # Supported extensions
+            SUPPORTED_EXTENSIONS = ('.csv', '.parquet', '.json', '.xlsx', '.xls', '.tsv')
+            
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
+                # Skip the prefix itself if it's returned as an object (directory placeholder)
+                if key.rstrip('/') == prefix.rstrip('/'):
+                    continue
+                
                 name = key.split("/")[-1]
-                if not name: continue
+                if not name: 
+                    continue
+                
+                # Filter by extension and size
+                if not name.lower().endswith(SUPPORTED_EXTENSIONS):
+                    continue
+                if obj.get("Size", 0) == 0:
+                    continue
                 
                 ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
                 canonical_path = f"s3://{bucket}/{key}"
@@ -338,6 +353,9 @@ class S3Connector(MCPSourceConnector):
                 
             resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, Delimiter="/")
             
+            # Supported extensions
+            SUPPORTED_EXTENSIONS = ('.csv', '.parquet', '.json', '.xlsx', '.xls', '.tsv')
+            
             folders = []
             for p in resp.get("CommonPrefixes", []):
                 folder_path_s3 = p.get("Prefix")
@@ -347,9 +365,21 @@ class S3Connector(MCPSourceConnector):
             files = []
             for c in resp.get("Contents", []):
                 key = c.get("Key")
-                if key == prefix: continue
+                # Skip the prefix itself (directory placeholder)
+                if key.rstrip('/') == prefix.rstrip('/'):
+                    continue
+                if key == prefix: 
+                    continue
+                
                 name = key.split("/")[-1]
-                if not name: continue
+                if not name: 
+                    continue
+                
+                # Filter by extension and size
+                if not name.lower().endswith(SUPPORTED_EXTENSIONS):
+                    continue
+                if c.get("Size", 0) == 0:
+                    continue
                 
                 ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
                 canonical_path = f"s3://{bucket}/{key}"
@@ -390,11 +420,30 @@ class ADLSConnector(MCPSourceConnector):
         try:
             resp = storage.list_objects_v2(Prefix=prefix, Container=container)
             datasets = []
+            
+            # Supported extensions
+            SUPPORTED_EXTENSIONS = ('.csv', '.parquet', '.json', '.xlsx', '.xls', '.tsv')
+            
             for obj in resp.get("Contents", []):
                 key  = obj["Key"]
+                
+                # Skip the prefix itself if it's returned as an object (directory placeholder)
+                if key.rstrip('/') == prefix.rstrip('/'):
+                    continue
+
                 name = key.split("/")[-1]
-                if not name or "/" in key[len(prefix):].lstrip("/"): 
-                    continue # Skip subdirectories if we only want immediate files, but list_objects_v2 is recursive...
+                if not name:
+                    continue
+                
+                # Skip subdirectories if we only want immediate files
+                if "/" in key[len(prefix):].lstrip("/"): 
+                    continue 
+
+                # Filter by extension and size
+                if not name.lower().endswith(SUPPORTED_EXTENSIONS):
+                    continue
+                if obj.get("Size", 0) == 0:
+                    continue
                 
                 ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
                 canonical_path = _normalize_path(key, client_name, "ADLS")
@@ -455,10 +504,17 @@ class ADLSConnector(MCPSourceConnector):
             folders_set = set()
             files = []
             
+            # Supported extensions
+            SUPPORTED_EXTENSIONS = ('.csv', '.parquet', '.json', '.xlsx', '.xls', '.tsv')
+            
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
-                rel = key[len(prefix):].lstrip("/") if prefix else key
                 
+                # Skip the prefix itself (directory placeholder)
+                if key.rstrip('/') == prefix.rstrip('/'):
+                    continue
+                    
+                rel = key[len(prefix):].lstrip("/") if prefix else key
                 if not rel:
                     continue
                     
@@ -466,13 +522,21 @@ class ADLSConnector(MCPSourceConnector):
                     folders_set.add(rel.split("/")[0])
                 else:
                     name = key.split("/")[-1]
-                    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                    if not name:
+                        continue
+                        
+                    # Filter by extension and size
+                    if not name.lower().endswith(SUPPORTED_EXTENSIONS):
+                        continue
+                    if obj.get("Size", 0) == 0:
+                        continue
+                        
                     canonical_path = _normalize_path(key, client_name, "ADLS")
                     
                     files.append({
                         "file_name": name,
                         "file_path": canonical_path,
-                        "file_format": ext.upper() if ext else "UNKNOWN",
+                        "file_format": name.rsplit(".", 1)[-1].upper() if "." in name else "UNKNOWN",
                         "file_size": obj.get("Size", 0)
                     })
                     
@@ -579,14 +643,27 @@ class LocalConnector(MCPSourceConnector):
         try:
             resp = storage.list_objects_v2(Prefix=prefix, Container=container)
             datasets = []
+            
+            # Supported extensions
+            SUPPORTED_EXTENSIONS = ('.csv', '.parquet', '.json', '.xlsx', '.xls', '.tsv')
+            
             for obj in resp.get("Contents", []):
                 key  = obj["Key"]
+                # Skip the prefix itself if it's returned as an object (directory placeholder)
+                if key.rstrip('/') == prefix.rstrip('/'):
+                    continue
+
                 name = key.split("/")[-1]
                 if not name or "." not in name:
                     continue
-                ext = name.rsplit(".", 1)[-1].lower()
-                if ext not in ("csv", "json", "parquet", "xlsx", "xls", "tsv"):
+                
+                # Filter by extension and size
+                if not name.lower().endswith(SUPPORTED_EXTENSIONS):
                     continue
+                if obj.get("Size", 0) == 0:
+                    continue
+
+                ext = name.rsplit(".", 1)[-1].lower()
                 datasets.append(DatasetInfo(
                     file_name   = name,
                     file_path   = key,

@@ -601,6 +601,17 @@ def save_master_config(request: dict, db: Session = Depends(get_db)):
     key = mgr._get_config_key(client_name)
     df = mgr._get_existing_config(key)
     
+    # Ensure source_object is the actual file name
+    source_obj = reformatted.get("source_object") or reformatted.get("file_name") or "source_export.csv"
+    if (reformatted.get("source_type") == "ADLS" and "runtime_pipeline_sources" in (reformatted.get("folder_path") or "")):
+        source_obj = "source_export.csv"
+
+    # Use source_object as part of dataset_id for ADLS promotions to ensure uniqueness and match ad-hoc discovery
+    dataset_id = source_meta.get("artifact_id") or reformatted.get("pipeline_name") or "fabric_pipeline"
+    if reformatted.get("source_type") == "ADLS" and source_obj == "source_export.csv":
+        # Keep original pipeline name as dataset_id but ensure it's not confused with source_object
+        pass
+
     # Construct a row
     new_row = {
         "dataset_id": dataset_id,
@@ -608,10 +619,10 @@ def save_master_config(request: dict, db: Session = Depends(get_db)):
         "client_name": client_name,
         "source_type": reformatted.get("source_type") or "FABRIC_RUNTIME",
         "source_folder": reformatted.get("folder_path") or reformatted.get("source_path") or "",
-        "source_object": reformatted.get("source_object") or reformatted.get("file_name") or "source_export.csv",
+        "source_object": source_obj,
         "file_format": (reformatted.get("file_types") or ["CSV"])[0],
-        "target_layer_bronze": f"Bronze/{client_name}/{reformatted.get('pipeline_name')}",
-        "target_layer_silver": f"Silver/{client_name}/{reformatted.get('pipeline_name')}",
+        "target_layer_bronze": f"Bronze/{client_name}/{reformatted.get('pipeline_name') or 'fabric_pipeline'}",
+        "target_layer_silver": f"Silver/{client_name}/{reformatted.get('pipeline_name') or 'fabric_pipeline'}",
         "is_active": True,
         "load_type": "full",
         "staging_table": reformatted.get("staging_table") or "",
@@ -620,7 +631,16 @@ def save_master_config(request: dict, db: Session = Depends(get_db)):
     
     # Upsert logic for CSV
     if not df.empty and "dataset_id" in df.columns:
+        # 1. Deduplicate by dataset_id (standard)
         df = df[df["dataset_id"] != dataset_id]
+        
+        # 2. Aggressive Deduplication for Fabric Runtime sources:
+        # If this is an ADLS promotion, remove any existing record for the same folder
+        # This prevents "Agentic_Azure_Pipeline" and "source_export.csv" from co-existing for the same pipeline.
+        if new_row["source_type"] == "ADLS" and "runtime_pipeline_sources" in new_row["source_folder"]:
+            folder_to_clean = new_row["source_folder"]
+            # Filter out any other records pointing to the same runtime source folder
+            df = df[df["source_folder"] != folder_to_clean]
     
     new_df = pd.DataFrame([new_row])
     # Ensure columns match MASTER_CONFIG_COLUMNS
