@@ -23,8 +23,8 @@ const STEPS_CONFIG = [
   { id: 'client', num: 1, label: 'Client', path: '/client' },
   { id: 'intelligence', num: 2, label: 'Intelligence', path: '/intelligence' },
   { id: 'sources-config', num: 3, label: 'Sources & Config', path: '/sources-config' },
-  { id: 'deployment', num: 4, label: 'Deployment', path: '/deployment' },
-  { id: 'dq-rules', num: 5, label: 'DQ Rules', path: '/dq-rules' },
+  { id: 'dq-rules', num: 4, label: 'DQ Rules', path: '/dq-rules' },
+  { id: 'deployment', num: 5, label: 'Deployment', path: '/deployment' },
   { id: 'review', num: 6, label: 'Review', path: '/review' },
   { id: 'execution', num: 7, label: 'Execution', path: '/execution' },
 ];
@@ -1007,7 +1007,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
             <div className="stepper-steps-container" style={{ display: 'flex', alignItems: 'center', gap: 0, flex: 1, justifyContent: 'center' }}>
               {STEPS_CONFIG.map((s, idx) => {
                 // Skip 'Deployment' step label if not Fabric
-                if (s.num === 4 && selectedPlatform !== 'FABRIC') return null;
+                if (s.num === 5 && selectedPlatform !== 'FABRIC') return null;
                 
                 return (
                   <div key={s.num} className={`stepper-item ${step === s.num ? 'active' : ''} ${step > s.num ? 'done' : ''}`}>
@@ -1185,11 +1185,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                     toast={toast}
                     onNext={() => { 
                       fetchDatasets(); 
-                      if (selectedPlatform === 'FABRIC') {
-                        goToStep(4); // Go to Deployment
-                      } else {
-                        goToStep(5); // Go to DQ Rules
-                      }
+                      goToStep(4); // Go to DQ Rules
                     }}
                     syncMasterConfig={syncMasterConfig}
                     intelligenceData={intelligenceData}
@@ -1201,17 +1197,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                 </div>
               )}
               {step === 4 && (
-                <StepDeployment
-                  selectedWorkspace={selectedWorkspace}
-                  selectedPipeline={selectedPipeline}
-                  deploymentStrategy={deploymentStrategy}
-                  deploymentPackage={deploymentPackage}
-                  setDeploymentPackage={setDeploymentPackage}
-                  fabricAccessToken={fabricAccessToken}
-                  onNext={() => goToStep(5)}
-                />
-              )}
-              {step === 5 && (
                 <StepDQ
                   selectedClient={selectedClient}
                   sourceType={sourceType}
@@ -1241,11 +1226,28 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   saveDqConfig={saveDqConfig}
                   editingConfigSaving={editingConfigSaving}
                   formatDatasetLabel={formatDatasetLabel}
-                  onNext={() => goToStep(6)}
+                  onNext={() => {
+                    if (selectedPlatform === 'FABRIC') {
+                      goToStep(5); // Go to Deployment
+                    } else {
+                      goToStep(6); // Go to Review
+                    }
+                  }}
                   onRunOrchestration={runOrchestration}
                   isOrchestrating={isOrchestrating}
                   datasetsLoading={datasetsLoading}
-                  onBack={() => goToStep(selectedPlatform === 'FABRIC' ? 4 : 3)}
+                  onBack={() => goToStep(3)}
+                />
+              )}
+              {step === 5 && (
+                <StepDeployment
+                  selectedWorkspace={selectedWorkspace}
+                  selectedPipeline={selectedPipeline}
+                  deploymentStrategy={deploymentStrategy}
+                  deploymentPackage={deploymentPackage}
+                  setDeploymentPackage={setDeploymentPackage}
+                  fabricAccessToken={fabricAccessToken}
+                  onNext={() => goToStep(6)}
                 />
               )}
               {step === 6 && (
@@ -1257,7 +1259,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                   configPersisted={configPersisted}
                   masterConfig={masterConfig}
                   requiresRealScan={selectedApiSource === 'intelligence-scan'}
-                  onBack={() => goToStep(5)}
+                  onBack={() => goToStep(selectedPlatform === 'FABRIC' ? 5 : 4)}
                   onConfirm={runOrchestration}
                   isOrchestrating={isOrchestrating}
                   fabricMode={sourceForm.fabricMode}
