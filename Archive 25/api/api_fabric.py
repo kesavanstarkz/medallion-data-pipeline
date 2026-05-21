@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Header
-from typing import List, Optional, Dict
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Header, Body
+from typing import List, Optional, Dict, Any
 from services.fabric.auth_service import FabricAuthService, resolve_fabric_token
 from services.fabric.workspace_service import FabricWorkspaceService
 from services.fabric.pipeline_service import FabricPipelineService
@@ -31,7 +31,7 @@ async def list_pipelines(workspace_id: str, authorization: str = Header(...)):
 async def deploy(
     workspace_id: str = Form(...),
     file: UploadFile = File(...),
-    authorization: str = Header(...)
+    authorization: Optional[str] = Header(None)
 ):
     token = get_token(authorization)
     if not token: raise HTTPException(status_code=401, detail="Invalid Token")
@@ -67,7 +67,7 @@ async def clone(
     source_pipeline_id: str = Form(...),
     target_workspace_id: str = Form(...),
     new_name: str = Form(...),
-    authorization: str = Header(...)
+    authorization: Optional[str] = Header(None)
 ):
     token = get_token(authorization)
     if not token: raise HTTPException(status_code=401, detail="Invalid Token")
@@ -80,4 +80,51 @@ async def clone(
         source_pipeline_id=source_pipeline_id,
         target_workspace_id=target_workspace_id,
         new_name=new_name
+    )
+
+@router.post("/reuse")
+async def reuse_pipeline(payload: Dict[str, Any] = Body(...), authorization: Optional[str] = Header(None)):
+    token = get_token(authorization)
+    if not token: raise HTTPException(status_code=401, detail="Invalid Token")
+    workspace_id = payload.get("workspace_id")
+    pipeline_id = payload.get("pipeline_id")
+    if not workspace_id or not pipeline_id:
+        raise HTTPException(status_code=400, detail="workspace_id and pipeline_id are required")
+    deploy_service = FabricDeployService(token)
+    return await deploy_service.reuse_pipeline(workspace_id=workspace_id, pipeline_id=pipeline_id)
+
+@router.post("/modify-source")
+async def modify_source(payload: Dict[str, Any] = Body(...), authorization: Optional[str] = Header(None)):
+    token = get_token(authorization)
+    if not token: raise HTTPException(status_code=401, detail="Invalid Token")
+    workspace_id = payload.get("workspace_id")
+    pipeline_id = payload.get("pipeline_id")
+    new_name = payload.get("new_name") or "Modified_Source_Pipeline"
+    if not workspace_id or not pipeline_id:
+        raise HTTPException(status_code=400, detail="workspace_id and pipeline_id are required")
+    deploy_service = FabricDeployService(token)
+    return await deploy_service.mutate_pipeline(
+        workspace_id=workspace_id,
+        pipeline_id=pipeline_id,
+        new_name=new_name,
+        mode="source",
+        source_params=payload.get("source_params") or {},
+    )
+
+@router.post("/modify-sink")
+async def modify_sink(payload: Dict[str, Any] = Body(...), authorization: Optional[str] = Header(None)):
+    token = get_token(authorization)
+    if not token: raise HTTPException(status_code=401, detail="Invalid Token")
+    workspace_id = payload.get("workspace_id")
+    pipeline_id = payload.get("pipeline_id")
+    new_name = payload.get("new_name") or "Modified_Sink_Pipeline"
+    if not workspace_id or not pipeline_id:
+        raise HTTPException(status_code=400, detail="workspace_id and pipeline_id are required")
+    deploy_service = FabricDeployService(token)
+    return await deploy_service.mutate_pipeline(
+        workspace_id=workspace_id,
+        pipeline_id=pipeline_id,
+        new_name=new_name,
+        mode="sink",
+        sink_params=payload.get("sink_params") or {},
     )

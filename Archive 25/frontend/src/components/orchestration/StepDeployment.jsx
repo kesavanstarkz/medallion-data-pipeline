@@ -20,6 +20,8 @@ export default function StepDeployment({
   const [status, setStatus] = useState('idle'); // idle | deploying | success | error
   const [error, setError] = useState(null);
   const [newPipelineName, setNewPipelineName] = useState(selectedPipeline?.name ? `${selectedPipeline.name}_cloned` : 'New_Fabric_Pipeline');
+  const [sourceParams, setSourceParams] = useState({ connection_id: '', relative_url: '', method: 'GET' });
+  const [sinkParams, setSinkParams] = useState({ connection_id: '', relative_url: '', method: 'POST' });
   const [deployLogs, setDeployLogs] = useState([]);
   const [isRecoveringToken, setIsRecoveringToken] = useState(false);
 
@@ -96,7 +98,7 @@ export default function StepDeployment({
       workspaceId: selectedWorkspace?.id,
       targetWorkspace: selectedWorkspace?.name || selectedWorkspace?.displayName,
       deploymentMode: deploymentStrategy,
-      requestedPipelineName: deploymentStrategy === 'CLONE' ? newPipelineName : (deploymentPackage?.name || selectedPipeline?.name),
+      requestedPipelineName: ['CLONE', 'MODIFY_SOURCE', 'MODIFY_SINK'].includes(deploymentStrategy) ? newPipelineName : (deploymentPackage?.name || selectedPipeline?.name),
       sourcePipelineId: selectedPipeline?.id
     };
     console.log("DEPLOY PAYLOAD", payload);
@@ -142,6 +144,49 @@ export default function StepDeployment({
           headers: fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {},
           body: formData
         });
+      } else if (deploymentStrategy === 'REUSE') {
+        addLog(`Reusing pipeline ${selectedPipeline?.name}...`);
+        response = await fetch(apiUrl('/fabric/reuse'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
+          },
+          body: JSON.stringify({
+            workspace_id: selectedWorkspace?.id,
+            pipeline_id: selectedPipeline?.id
+          })
+        });
+      } else if (deploymentStrategy === 'MODIFY_SOURCE') {
+        addLog(`Replacing source for ${selectedPipeline?.name}...`);
+        response = await fetch(apiUrl('/fabric/modify-source'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
+          },
+          body: JSON.stringify({
+            workspace_id: selectedWorkspace?.id,
+            pipeline_id: selectedPipeline?.id,
+            new_name: newPipelineName,
+            source_params: sourceParams
+          })
+        });
+      } else if (deploymentStrategy === 'MODIFY_SINK') {
+        addLog(`Replacing sink for ${selectedPipeline?.name}...`);
+        response = await fetch(apiUrl('/fabric/modify-sink'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
+          },
+          body: JSON.stringify({
+            workspace_id: selectedWorkspace?.id,
+            pipeline_id: selectedPipeline?.id,
+            new_name: newPipelineName,
+            sink_params: sinkParams
+          })
+        });
       } else {
         throw new Error(`Strategy ${deploymentStrategy} is not yet implemented with a real backend call.`);
       }
@@ -153,8 +198,8 @@ export default function StepDeployment({
         throw new Error(result.detail || "Deployment failed");
       }
 
-      const deployedName = result.pipeline_deployed || result.displayName;
-      const deployedId = result.id || (result.fabric_response?.id);
+      const deployedName = result.pipeline_deployed || result.displayName || selectedPipeline?.name;
+      const deployedId = result.id || result.pipeline_id || (result.fabric_response?.id) || selectedPipeline?.id;
 
       addLog(`Fabric Deployment Successful: ${deployedName}`);
       addLog(`Item ID: ${deployedId}`);
@@ -308,13 +353,19 @@ export default function StepDeployment({
         </div>
       )}
 
-      {/* STRATEGY: MODIFY */}
-      {deploymentStrategy === 'MODIFY' && (
+      {/* STRATEGY: MODIFY_SOURCE */}
+      {deploymentStrategy === 'MODIFY_SOURCE' && (
         <div className="strategy-section pi-card pi-wide" style={{ border: '1px solid #e2e8f0', padding: 24 }}>
           <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <FiEdit2 color="#2563eb" /> Modify Template
+            <FiEdit2 color="#2563eb" /> Modify Source
           </h3>
-          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Edit existing activities and configurations before deployment.</p>
+          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Replace the Copy activity REST source while preserving mappings, policy, and dependencies.</p>
+          <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+            <input className="orch-input" placeholder="New pipeline name" value={newPipelineName} onChange={(e) => setNewPipelineName(e.target.value)} />
+            <input className="orch-input" placeholder="Fabric REST connection id" value={sourceParams.connection_id} onChange={(e) => setSourceParams(prev => ({ ...prev, connection_id: e.target.value }))} />
+            <input className="orch-input" placeholder="Relative URL, e.g. /v1/orders" value={sourceParams.relative_url} onChange={(e) => setSourceParams(prev => ({ ...prev, relative_url: e.target.value }))} />
+            <input className="orch-input" placeholder="Method" value={sourceParams.method} onChange={(e) => setSourceParams(prev => ({ ...prev, method: e.target.value }))} />
+          </div>
           
           <div className="simulated-editor" style={{ background: '#0f172a', borderRadius: 12, padding: 20, color: '#94a3b8', fontFamily: 'monospace', fontSize: 12 }}>
             <div style={{ color: '#38bdf8' }}>{"{"}</div>
@@ -328,6 +379,22 @@ export default function StepDeployment({
           </div>
           <div style={{ marginTop: 16, textAlign: 'right' }}>
             <span style={{ fontSize: 12, color: '#94a3b8' }}>Advanced Activity Editor →</span>
+          </div>
+        </div>
+      )}
+
+      {/* STRATEGY: MODIFY_SINK */}
+      {deploymentStrategy === 'MODIFY_SINK' && (
+        <div className="strategy-section pi-card pi-wide" style={{ border: '1px solid #e2e8f0', padding: 24 }}>
+          <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <FiEdit2 color="#2563eb" /> Modify Sink
+          </h3>
+          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Replace the Copy activity REST sink while preserving mappings, policy, and dependencies.</p>
+          <div style={{ display: 'grid', gap: 12 }}>
+            <input className="orch-input" placeholder="New pipeline name" value={newPipelineName} onChange={(e) => setNewPipelineName(e.target.value)} />
+            <input className="orch-input" placeholder="Fabric REST connection id" value={sinkParams.connection_id} onChange={(e) => setSinkParams(prev => ({ ...prev, connection_id: e.target.value }))} />
+            <input className="orch-input" placeholder="Relative URL, e.g. /v1/target" value={sinkParams.relative_url} onChange={(e) => setSinkParams(prev => ({ ...prev, relative_url: e.target.value }))} />
+            <input className="orch-input" placeholder="Method" value={sinkParams.method} onChange={(e) => setSinkParams(prev => ({ ...prev, method: e.target.value }))} />
           </div>
         </div>
       )}
@@ -373,14 +440,9 @@ export default function StepDeployment({
       )}
 
       <div className="step-footer" style={{ marginTop: 32 }}>
-        {deploymentStrategy === 'REUSE' ? (
-           <button className="orch-btn primary" onClick={onNext}>
-             Continue to Configuration <FiChevronRight style={{ marginLeft: 8 }} />
-           </button>
-        ) : (
            <button 
              className="orch-btn primary deploy-btn" 
-             disabled={status === 'deploying' || (deploymentStrategy === 'CREATE_NEW' && !deploymentPackage)} 
+             disabled={status === 'deploying' || (deploymentStrategy === 'CREATE_NEW' && !deploymentPackage) || (deploymentStrategy !== 'CREATE_NEW' && (!selectedWorkspace?.id || !selectedPipeline?.id))} 
              onClick={executeDeployment}
              style={{ background: '#2563eb', padding: '12px 32px' }}
            >
@@ -388,11 +450,12 @@ export default function StepDeployment({
                <>
                  {deploymentStrategy === 'CREATE_NEW' && <><FiPlus style={{ marginRight: 8 }} /> Create & Deploy Pipeline</>}
                  {deploymentStrategy === 'CLONE' && <><FiCopy style={{ marginRight: 8 }} /> Clone & Deploy Pipeline</>}
-                 {deploymentStrategy === 'MODIFY' && <><FiEdit2 style={{ marginRight: 8 }} /> Save & Redeploy Pipeline</>}
+                 {deploymentStrategy === 'REUSE' && <><FiZap style={{ marginRight: 8 }} /> Reuse Pipeline</>}
+                 {deploymentStrategy === 'MODIFY_SOURCE' && <><FiEdit2 style={{ marginRight: 8 }} /> Replace Source & Deploy</>}
+                 {deploymentStrategy === 'MODIFY_SINK' && <><FiEdit2 style={{ marginRight: 8 }} /> Replace Sink & Deploy</>}
                </>
              )}
            </button>
-        )}
       </div>
 
       <style jsx>{`

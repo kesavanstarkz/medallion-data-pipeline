@@ -16,18 +16,37 @@ class FabricPipelineService:
             "Content-Type": "application/json"
         }
 
+    def _network_error(self, action: str, exc: httpx.RequestError) -> HTTPException:
+        target = str(exc.request.url) if exc.request else FABRIC_API_BASE
+        return HTTPException(
+            status_code=503,
+            detail={
+                "code": "FabricNetworkError",
+                "message": f"Unable to reach Microsoft Fabric API while {action}.",
+                "target": target,
+                "reason": exc.__class__.__name__,
+                "hint": "Check internet/proxy/VPN/SSL inspection settings and retry.",
+            },
+        )
+
     async def list_pipelines(self, workspace_id: str):
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Note: Fabric items API
-            resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items?type=DataPipeline", headers=self.headers)
-            resp.raise_for_status()
-            return resp.json().get("value", [])
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Note: Fabric items API
+                resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items?type=DataPipeline", headers=self.headers)
+                resp.raise_for_status()
+                return resp.json().get("value", [])
+        except httpx.RequestError as exc:
+            raise self._network_error("listing pipelines", exc) from exc
 
     async def get_pipeline(self, workspace_id: str, pipeline_id: str) -> Dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}", headers=self.headers)
-            resp.raise_for_status()
-            return resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}", headers=self.headers)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.RequestError as exc:
+            raise self._network_error("loading pipeline metadata", exc) from exc
 
     async def run_pipeline(self, workspace_id: str, pipeline_id: str, pipeline_name: Optional[str] = None, owner_upn: Optional[str] = None, owner_object_id: Optional[str] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"executionData": {}}
@@ -38,36 +57,42 @@ class FabricPipelineService:
         if owner_object_id:
             payload["executionData"]["OwnerUserObjectId"] = owner_object_id
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances?jobType=Pipeline",
-                headers=self.headers,
-                json=payload,
-            )
-            if resp.status_code not in (200, 201, 202):
-                raise HTTPException(status_code=resp.status_code, detail=f"Pipeline execution failed: {resp.text}")
-            location = resp.headers.get("Location", "")
-            job_instance_id = location.rstrip("/").split("/")[-1] if location else None
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            return {
-                "job_instance_id": job_instance_id or body.get("id"),
-                "location": location,
-                "body": body,
-                "status_code": resp.status_code,
-            }
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances?jobType=Pipeline",
+                    headers=self.headers,
+                    json=payload,
+                )
+                if resp.status_code not in (200, 201, 202):
+                    raise HTTPException(status_code=resp.status_code, detail=f"Pipeline execution failed: {resp.text}")
+                location = resp.headers.get("Location", "")
+                job_instance_id = location.rstrip("/").split("/")[-1] if location else None
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {}
+                return {
+                    "job_instance_id": job_instance_id or body.get("id"),
+                    "location": location,
+                    "body": body,
+                    "status_code": resp.status_code,
+                }
+        except httpx.RequestError as exc:
+            raise self._network_error("starting pipeline execution", exc) from exc
 
     async def get_pipeline_job_instance(self, workspace_id: str, pipeline_id: str, job_instance_id: str) -> Dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances/{job_instance_id}",
-                headers=self.headers,
-            )
-            if not resp.is_success:
-                raise HTTPException(status_code=resp.status_code, detail=f"Get pipeline job instance failed: {resp.text}")
-            return resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/jobs/instances/{job_instance_id}",
+                    headers=self.headers,
+                )
+                if not resp.is_success:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Get pipeline job instance failed: {resp.text}")
+                return resp.json()
+        except httpx.RequestError as exc:
+            raise self._network_error("polling pipeline job status", exc) from exc
 
     async def query_activity_runs(
         self,
@@ -82,16 +107,19 @@ class FabricPipelineService:
             "lastUpdatedAfter": last_updated_after,
             "lastUpdatedBefore": last_updated_before,
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/datapipelines/pipelineruns/{job_instance_id}/queryactivityruns",
-                headers=self.headers,
-                json=payload,
-            )
-            if not resp.is_success:
-                raise HTTPException(status_code=resp.status_code, detail=f"Query activity runs failed: {resp.text}")
-            body = resp.json()
-            return body if isinstance(body, list) else body.get("value", [])
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{FABRIC_API_BASE}/workspaces/{workspace_id}/datapipelines/pipelineruns/{job_instance_id}/queryactivityruns",
+                    headers=self.headers,
+                    json=payload,
+                )
+                if not resp.is_success:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Query activity runs failed: {resp.text}")
+                body = resp.json()
+                return body if isinstance(body, list) else body.get("value", [])
+        except httpx.RequestError as exc:
+            raise self._network_error("querying pipeline activity runs", exc) from exc
 
     async def bulk_export_definitions(self, workspace_id: str, pipeline_ids: list):
         """Polls LRO and returns a dict of {pipeline_id: {filename: content}}"""

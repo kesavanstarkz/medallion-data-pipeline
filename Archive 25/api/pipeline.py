@@ -3,7 +3,9 @@ from core.pipeline_service import PipelineService
 from core.utils import PreviewDataService
 from sqlalchemy.orm import Session
 from core.database import get_db
-from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
 
@@ -60,3 +62,4 @@ def preview_data(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

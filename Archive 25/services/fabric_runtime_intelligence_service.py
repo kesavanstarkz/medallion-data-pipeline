@@ -1020,6 +1020,7 @@ async def execute_and_capture_runtime_intelligence(
     # PHASE 1: Wait for Pipeline Completion
     deadline = datetime.utcnow() + timedelta(seconds=timeout_seconds)
     pipeline_completed = False
+    transient_poll_errors: List[Dict[str, Any]] = []
     
     while datetime.utcnow() < deadline:
         try:
@@ -1032,8 +1033,35 @@ async def execute_and_capture_runtime_intelligence(
         except HTTPException as exc:
             if exc.status_code == 403:
                 raise _fabric_permission_error(token_validation)
+            if exc.status_code in {429, 500, 502, 503, 504}:
+                transient_poll_errors.append({
+                    "status_code": exc.status_code,
+                    "detail": exc.detail,
+                    "attempted_at": _iso_now(),
+                })
+                logger.warning(
+                    "Transient Fabric job polling failure for %s: %s",
+                    job_instance_id,
+                    exc.detail,
+                )
+                await asyncio.sleep(poll_interval_seconds)
+                continue
             raise
         await asyncio.sleep(poll_interval_seconds)
+
+    if not pipeline_completed and transient_poll_errors:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "FabricRuntimePollingUnavailable",
+                "message": "The pipeline was started, but the backend could not reliably poll Microsoft Fabric for runtime status.",
+                "pipeline_run_id": job_instance_id,
+                "workspace_id": workspace_id,
+                "pipeline_id": pipeline_id,
+                "transient_errors": transient_poll_errors[-3:],
+                "hint": "Check internet/proxy/VPN/SSL inspection settings, then retry runtime intelligence. The Fabric pipeline may still be running in Fabric.",
+            },
+        )
 
     # PHASE 2: Wait for Activity Metadata (Eventual Consistency)
     # Fabric completion does not guarantee immediate activity metadata availability.
