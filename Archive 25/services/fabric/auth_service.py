@@ -1,6 +1,11 @@
 import httpx
 import os
 from fastapi import HTTPException
+import time
+import base64
+import json
+import requests
+from loguru import logger
 
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
 FABRIC_API_SCOPE = "https://api.fabric.microsoft.com/.default"
@@ -42,9 +47,68 @@ def resolve_fabric_token(request_or_header: str = None) -> str:
     # 2. Check cache
     cached = get_cached_fabric_token()
     if cached:
-        return cached
-        
+        try:
+            if not _is_token_expired(cached):
+                return cached
+            # Token expired; try to refresh using client credentials as a fallback
+            logger.info("Cached Fabric token expired, attempting client-credentials refresh")
+            new = _get_client_token_sync()
+            if new:
+                save_fabric_token(new)
+                return new
+            logger.warning("Client-credentials refresh did not return a token")
+        except Exception as exc:
+            logger.exception("Error while attempting to refresh Fabric token: {}", exc)
     return None
+
+
+def _decode_jwt_unverified(token: str) -> dict:
+    parts = (token or "").split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload + padding)
+        data = json.loads(decoded.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _is_token_expired(token: str) -> bool:
+    claims = _decode_jwt_unverified(token)
+    exp = claims.get("exp")
+    if not exp:
+        return False
+    now = int(time.time())
+    return int(exp) <= now
+
+
+def _get_client_token_sync(scope: str = FABRIC_API_SCOPE) -> str:
+    """Synchronous client credentials token acquisition used as a best-effort fallback when a cached delegated token expires."""
+    tenant = os.getenv("AZURE_TENANT_ID")
+    client_id = os.getenv("AZURE_CLIENT_ID")
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+    if not tenant or not client_id or not client_secret:
+        logger.debug("Client credentials not configured, cannot refresh token via client-credentials.")
+        return None
+    url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "client_credentials",
+        "scope": scope,
+    }
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+        if resp.status_code != 200:
+            logger.warning("Client-credentials token refresh failed: %s", resp.text)
+            return None
+        return resp.json().get("access_token")
+    except Exception as exc:
+        logger.exception("HTTP error during client-credentials token refresh: {}", exc)
+        return None
 
 class FabricAuthService:
     def __init__(self, tenant_id=None, client_id=None, client_secret=None):

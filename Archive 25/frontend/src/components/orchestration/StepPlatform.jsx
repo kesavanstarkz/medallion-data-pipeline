@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { FiZap, FiCloud, FiBox, FiCpu, FiCheck, FiChevronRight } from 'react-icons/fi';
 import { motion, AnimatePresence } from 'framer-motion';
 import logo from '../../assets/images/image.png';
@@ -12,6 +11,7 @@ const PLATFORMS = [
     gradient: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
     desc: 'Unified analytics platform',
     features: ['Lakehouse', 'Data Pipelines', 'Notebooks', 'Warehouse'],
+    enabled: true,
   },
   {
     id: 'AZURE',
@@ -21,6 +21,7 @@ const PLATFORMS = [
     gradient: 'linear-gradient(135deg, #0078d4 0%, #00a4ef 100%)',
     desc: 'Azure Data Factory & ADLS',
     features: ['Data Factory', 'ADLS Gen2', 'Synapse', 'Databricks'],
+    enabled: false,
   },
   {
     id: 'AWS',
@@ -30,6 +31,7 @@ const PLATFORMS = [
     gradient: 'linear-gradient(135deg, #f59e0b 0%, #f97316 100%)',
     desc: 'S3, Glue & Lambda',
     features: ['S3', 'Glue', 'Lambda', 'Redshift'],
+    enabled: false,
   },
   {
     id: 'DATABRICKS',
@@ -39,6 +41,7 @@ const PLATFORMS = [
     gradient: 'linear-gradient(135deg, #ef4444 0%, #f97316 100%)',
     desc: 'Lakehouse platform',
     features: ['Delta Lake', 'Spark', 'MLflow', 'Unity Catalog'],
+    enabled: false,
   },
 ];
 
@@ -82,11 +85,15 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
               animate="animate"
               whileHover={{ y: -6, scale: 1.02, transition: { duration: 0.2 } }}
               whileTap={{ scale: 0.98 }}
-              onClick={() => setSelectedPlatform(p.id)}
-              className={`platform-selection-card ${selectedPlatform === p.id ? 'selected' : ''}`}
+              onClick={() => {
+                if (p.enabled) setSelectedPlatform(p.id);
+              }}
+              className={`platform-selection-card ${selectedPlatform === p.id ? 'selected' : ''} ${!p.enabled ? 'disabled coming-soon' : ''}`}
               style={{
                 '--p-color': p.color,
                 '--p-gradient': p.gradient,
+                opacity: p.enabled ? 1 : 0.62,
+                cursor: p.enabled ? 'pointer' : 'not-allowed',
               }}
             >
               {/* Selection indicator */}
@@ -116,6 +123,9 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
               >
                 {p.label}
               </div>
+              {!p.enabled && (
+                <div className="coming-soon-pill">Coming Soon</div>
+              )}
 
               {/* Description */}
               <div className="platform-desc">
@@ -159,6 +169,7 @@ export default function StepPlatform({ selectedPlatform, setSelectedPlatform, on
             <button
               className="orch-btn primary premium-btn"
               onClick={onNext}
+              disabled={selectedPlatform !== 'FABRIC'}
             >
               Continue <FiChevronRight />
             </button>

@@ -68,6 +68,9 @@ export default function StepClient({
   const handleSelectClient = (c) => {
     setSelectedClient(c);
     localStorage.setItem('client_name', c);
+    if (selectedClient !== c) {
+      setSelectedTarget(null);
+    }
     fetchTargets(c);
   };
 

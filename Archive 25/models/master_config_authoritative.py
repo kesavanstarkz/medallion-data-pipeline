@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, DateTime, Text
+from sqlalchemy import Column, String, Boolean, DateTime, Text, JSON
 from core.database import Base
 from datetime import datetime
 
@@ -16,6 +16,7 @@ class MasterConfigAuthoritative(Base):
     target_layer_bronze = Column(Text, nullable=True)
     target_layer_silver = Column(Text, nullable=True)
     is_active = Column(Boolean, default=False)
+    schema = Column(JSON, nullable=True)
     load_type = Column(String(50), nullable=True)
     upsert_key = Column(String(255), nullable=True)
     watermark_column = Column(String(255), nullable=True)

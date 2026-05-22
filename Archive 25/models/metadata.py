@@ -81,6 +81,10 @@ class PipelineRunHistory(Base):
     client_name = Column(String, nullable=False, index=True)
     source_type = Column(String, nullable=False)
     folder_path = Column(String, nullable=True)
+    platform = Column(String, nullable=True)
+    workspace_id = Column(String, nullable=True)
+    pipeline_id = Column(String, nullable=True)
+    deployment_strategy = Column(String, nullable=True)
     
     status = Column(String, default="RUNNING")  # RUNNING, SUCCESS, FAILURE, PARTIAL
     start_time = Column(DateTime, default=datetime.utcnow)

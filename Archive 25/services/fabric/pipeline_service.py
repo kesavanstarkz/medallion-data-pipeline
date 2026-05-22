@@ -123,6 +123,11 @@ class FabricPipelineService:
 
     async def bulk_export_definitions(self, workspace_id: str, pipeline_ids: list):
         """Polls LRO and returns a dict of {pipeline_id: {filename: content}}"""
+        logger.info(
+            "bulk_export_definitions request workspace_id=%s pipeline_item_ids=%s",
+            workspace_id,
+            pipeline_ids,
+        )
         url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/bulkExportDefinitions?beta=true"
         payload = {
             "mode": "Selective",

@@ -46,7 +46,10 @@ class FabricScanner(CloudScanner):
                     # Create structured workspace object for the Explorer UI
                     workspace_obj = {
                         "id": ws_id,
+                        "workspace_id": ws_id,
+                        "workspace_name": ws_name,
                         "name": ws_name,
+                        "displayName": ws_name,
                         "type": ws.get('type'),
                         "pipelines": []
                     }
@@ -70,7 +73,12 @@ class FabricScanner(CloudScanner):
                             if str(item_type).lower() in {"pipeline", "datapipeline", "data pipeline"}:
                                 workspace_obj["pipelines"].append({
                                     "id": item_id,
-                                    "name": item_name
+                                    "pipeline_item_id": item_id,
+                                    "pipeline_id": item_id,
+                                    "pipeline_name": item_name,
+                                    "name": item_name,
+                                    "displayName": item_name,
+                                    "workspace_id": ws_id,
                                 })
                                 
                                 # Fetch definition for the specific pipeline

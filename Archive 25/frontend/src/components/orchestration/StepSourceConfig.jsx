@@ -98,11 +98,11 @@ export default function StepSourceConfig({
             <div className="step-header-responsive">
                 <div className="step-header-text">
                     <h2 className="step-title">
-                        Configure Source & Data Quality
+                        Source Config
                     </h2>
                     <p className="step-sub">
-                        Set up your source connection, configure schema mapping,
-                        and define data quality rules.
+                        Generate the metadata-driven master configuration and
+                        review data quality rules from the registered source.
                     </p>
                 </div>
             </div>
@@ -137,7 +137,7 @@ export default function StepSourceConfig({
                         ) : (
                             <FiChevronRight size={20} />
                         )}
-                        <span>Source Configuration</span>
+                        <span>Master Config</span>
                         {configPersisted && (
                             <FiCheck
                                 size={16}

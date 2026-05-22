@@ -673,6 +673,17 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
         source_folder = str(row.iloc[0].get("source_folder")) if pd.notna(row.iloc[0].get("source_folder")) else None
         source_object = str(row.iloc[0].get("source_object")) if pd.notna(row.iloc[0].get("source_object")) else None
 
+    # If schema was previously persisted in authoritative master config, return it directly
+    if mc and getattr(mc, "schema", None):
+        try:
+            cols = []
+            for col in mc.schema.get("columns", []) if isinstance(mc.schema, dict) else (mc.schema or []):
+                # Normalize to expected output for DQ
+                cols.append({"name": col.get("column_name") or col.get("name"), "inferred_type": col.get("data_type") or col.get("inferred_type")})
+            return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
+        except Exception:
+            logger.warning("Failed returning stored schema from MasterConfigAuthoritative; falling back to live inference")
+
     if not (resolved_client and source_type and source_folder and source_object):
         raise HTTPException(status_code=400, detail="Insufficient metadata to resolve dataset columns")
 
@@ -704,6 +715,7 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
         buf = BytesIO(content)
         df_sample = pd.read_csv(buf, nrows=50)
         cols = []
+        preview_rows = []
         for c in df_sample.columns:
             dtype = str(df_sample[c].dtype)
             if "int" in dtype:
@@ -715,12 +727,42 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
             else:
                 inferred = "string"
             cols.append({"name": str(c), "inferred_type": inferred})
+        # capture up to 5 preview rows
+        preview_rows = df_sample.head(5).to_dict(orient="records") if not df_sample.empty else []
+
+        # Persist schema to MasterConfigAuthoritative if available
+        try:
+            if mc:
+                schema_payload = {"columns": [{"name": c["name"], "data_type": c["inferred_type"], "nullable": True} for c in cols], "preview_rows": preview_rows}
+                db_mc = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+                if db_mc:
+                    db_mc.schema = schema_payload
+                    db.commit()
+        except Exception as persist_exc:
+            logger.warning(f"Failed to persist inferred schema for {dataset_id}: {persist_exc}")
+
         return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
     except Exception:
         try:
             buf = BytesIO(content)
             df_parq = pd.read_parquet(buf)
             cols = [{"name": str(c), "inferred_type": "unknown"} for c in df_parq.columns]
+            preview_rows = []
+            try:
+                preview_rows = df_parq.head(5).to_dict(orient="records")
+            except Exception:
+                preview_rows = []
+
+            try:
+                if mc:
+                    schema_payload = {"columns": [{"name": c["name"], "data_type": "unknown", "nullable": True} for c in cols], "preview_rows": preview_rows}
+                    db_mc = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+                    if db_mc:
+                        db_mc.schema = schema_payload
+                        db.commit()
+            except Exception as persist_exc:
+                logger.warning(f"Failed to persist inferred parquet schema for {dataset_id}: {persist_exc}")
+
             return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
         except Exception as e2:
             logger.error(f"Schema inference failed: {e2}")

@@ -58,6 +58,7 @@ export default function StepReviewConfirm({
   deploymentPackage = null,
   selectedWorkspace = null,
   selectedPipeline = null,
+  selectedTarget = null,
   masterConfig = null,
 }) {
   const isFabricDeploy = fabricMode === 'DEPLOY';
@@ -75,7 +76,7 @@ export default function StepReviewConfirm({
       source_type: masterConfig?.source_type || (isFabricDeploy ? 'FABRIC' : sourceType),
       folder_path: masterConfig?.source_folder || intelligenceData?.reformatted_config?.folder_path || folderPath || '',
       pipeline_name: selectedPipeline?.name || masterConfig?.pipeline_name || 'New_Fabric_Pipeline',
-      dataset_id: masterConfig?.dataset_id || intelligenceData?.reformatted_config?.dataset_id || '',
+      dataset_id: masterConfig?.dataset_id || intelligenceData?.reformatted_config?.dataset_id || selectedPipeline?.id || '',
       bronze_target: masterConfig?.target_layer_bronze || intelligenceData?.reformatted_config?.target_layer_bronze || '',
       silver_target: masterConfig?.target_layer_silver || intelligenceData?.reformatted_config?.target_layer_silver || '',
       client_name: masterConfig?.client_name || selectedClient || localStorage.getItem('client_name') || 'fabric_client',
@@ -84,8 +85,10 @@ export default function StepReviewConfirm({
       platform: selectedPlatform,
       discovery_mode: intelligenceData?.discovery_mode || (isFabricDeploy ? 'FABRIC_RUNTIME' : null),
       deployment_strategy: deploymentStrategy,
-      workspace_id: selectedWorkspace?.id,
-      pipeline_id: selectedPipeline?.id,
+      workspace_id: selectedWorkspace?.workspace_id || selectedWorkspace?.id,
+      pipeline_id: selectedPipeline?.pipeline_item_id || selectedPipeline?.id,
+      workspace_name: selectedWorkspace?.workspace_name || selectedWorkspace?.name || selectedWorkspace?.displayName,
+      pipeline_name: selectedPipeline?.pipeline_name || selectedPipeline?.name || selectedPipeline?.displayName,
       staging_table: masterConfig?.staging_table || intelligenceData?.staging_table || '',
       package_name: deploymentPackage?.name,
     },
@@ -169,6 +172,7 @@ export default function StepReviewConfirm({
           <SummaryChip label="Config Saved" value={configPersisted ? 'Yes' : 'No'} />
           <SummaryChip label="Source" value={sourceType} />
           <SummaryChip label="Endpoint" value={intelligenceData?.staging_table || folderPath} />
+          <SummaryChip label="Target" value={selectedTarget?.target_name || selectedTarget?.target_type || 'None'} />
         </div>
 
         {/* Structured Intelligence Cards */}

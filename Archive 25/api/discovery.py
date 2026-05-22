@@ -15,6 +15,7 @@ from services.pipeline_intelligence_service import analyze_pipeline_live
 from services.fabric_bundle_analysis_service import analyze_fabric_bundle
 from services.fabric_runtime_intelligence_service import execute_and_capture_runtime_intelligence
 from services.fabric.auth_service import FabricAuthService, ONELAKE_STORAGE_SCOPE
+from services.fabric.pipeline_service import FabricPipelineService
 from api.storage import preview_file
 from core.database import SessionLocal
 from core.database import get_db
@@ -759,6 +760,12 @@ def save_runtime_source(request: RuntimeSourceSaveRequest, db: Session = Depends
     authoritative.raw_layer_path = source_path
     authoritative.target_layer_bronze = target_connection.get("folder_path") or target_connection.get("full_path")
     authoritative.is_active = True
+    # Persist schema discovery (if available) into authoritative master config for DQ
+    try:
+        if schema_discovery:
+            authoritative.schema = schema_discovery
+    except Exception:
+        logger.warning("Could not persist schema_discovery into authoritative master config")
     authoritative.updated_at = datetime.utcnow()
 
     legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == dataset_id).first()
@@ -780,6 +787,12 @@ def save_runtime_source(request: RuntimeSourceSaveRequest, db: Session = Depends
         "source_connection": source_connection,
         "target_connection": target_connection,
     }
+    # Also persist schema JSON in legacy master config for backward compatibility
+    try:
+        if schema_discovery:
+            legacy.schema = schema_discovery
+    except Exception:
+        logger.warning("Could not persist schema_discovery into legacy master config")
     legacy.rows_read = runtime_statistics.get("rows_read") or 0
     legacy.rows_written = runtime_statistics.get("rows_written") or 0
     legacy.updated_at = datetime.utcnow()
@@ -1022,6 +1035,82 @@ async def run_discovery_analyze(request: AnalyzeRequest, http_request: Request):
         scan_target = request.target or (requested_platform.lower() if requested_platform else None)
         providers = request.providers or scan_target
 
+        analysis_payload = request.payload
+        fabric_payload = request.payload if isinstance(request.payload, dict) else {}
+        fabric_pipeline_ref = (
+            fabric_payload.get("pipeline_item_id")
+            or fabric_payload.get("pipeline_id")
+            or fabric_payload.get("pipeline")
+        )
+        if (
+            requested_platform == "FABRIC"
+            and fabric_payload.get("workspace_id")
+            and fabric_pipeline_ref
+        ):
+            token_for_extract = bearer_token
+            if not token_for_extract:
+                from services.fabric.auth_service import get_cached_fabric_token
+                token_for_extract = get_cached_fabric_token()
+            if token_for_extract:
+                try:
+                    from services.fabric.entity_resolver import (
+                        resolve_fabric_deployment_context,
+                        log_export_context,
+                    )
+                    fabric_ctx = await resolve_fabric_deployment_context(
+                        token_for_extract,
+                        workspace_id=fabric_payload.get("workspace_id"),
+                        workspace_name=fabric_payload.get("workspace_name"),
+                        pipeline_id=fabric_pipeline_ref,
+                        pipeline_item_id=fabric_payload.get("pipeline_item_id"),
+                        pipeline_name=fabric_payload.get("pipeline_name"),
+                    )
+                    log_export_context(
+                        workspace_id=fabric_ctx["workspace_id"],
+                        pipeline_item_id=fabric_ctx["pipeline_item_id"],
+                        workspace_name=fabric_ctx["workspace_name"],
+                        pipeline_name=fabric_ctx["pipeline_name"],
+                        operation="discovery_analyze",
+                    )
+                    pipeline_service = FabricPipelineService(token_for_extract)
+                    exported = await pipeline_service.bulk_export_definitions(
+                        fabric_ctx["workspace_id"],
+                        [fabric_ctx["pipeline_item_id"]],
+                    )
+                    files = exported.get(fabric_ctx["pipeline_item_id"], {})
+                    pipeline_json = json.loads((files.get("pipeline.json") or b"{}").decode("utf-8"))
+                    manifest_json = json.loads((files.get("manifest.json") or b"{}").decode("utf-8"))
+                    pipeline_name = (
+                        manifest_json.get("name")
+                        or manifest_json.get("displayName")
+                        or pipeline_json.get("name")
+                        or request.payload.get("pipeline_name")
+                        or "Fabric Pipeline"
+                    )
+                    properties = pipeline_json.get("properties", pipeline_json)
+                    analysis_payload = {
+                        "workspace_id": fabric_ctx["workspace_id"],
+                        "workspace_name": fabric_ctx["workspace_name"],
+                        "pipeline_id": fabric_ctx["pipeline_item_id"],
+                        "pipeline_item_id": fabric_ctx["pipeline_item_id"],
+                        "pipeline_name": fabric_ctx["pipeline_name"],
+                        "resources": [{
+                            "name": pipeline_name,
+                            "type": "pipelines",
+                            "apiVersion": "2018-06-01",
+                            "properties": properties,
+                            "metadata": {
+                                "workspaceId": fabric_ctx["workspace_id"],
+                                "itemId": fabric_ctx["pipeline_item_id"],
+                                "fabricItemType": "DataPipeline",
+                            },
+                        }],
+                        "raw_definition": pipeline_json,
+                        "manifest": manifest_json,
+                    }
+                except Exception as exc:
+                    logger.warning("Fabric pipeline definition export failed during analysis: %s", exc)
+
         result = await analyze_pipeline_live(
             client_name=request.client_name,
             providers=providers,
@@ -1033,7 +1122,7 @@ async def run_discovery_analyze(request: AnalyzeRequest, http_request: Request):
             use_local_llm=request.use_local_llm,
             scan_mode=request.scan_mode,
             authorization_token=bearer_token,
-            payload=request.payload,
+            payload=analysis_payload,
         )
         return result
     except HTTPException:

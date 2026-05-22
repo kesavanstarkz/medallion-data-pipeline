@@ -1,505 +1,874 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  FiUploadCloud, FiPackage, FiCheck, FiAlertCircle, 
-  FiFileText, FiServer, FiChevronRight, FiCopy, 
-  FiEdit2, FiZap, FiPlus, FiArrowRight, FiActivity, FiSearch
-} from 'react-icons/fi';
-import { motion, AnimatePresence } from 'framer-motion';
-import { apiUrl } from '../../hooks/useApi';
+import React, { useEffect, useState } from "react";
+import {
+    FiAlertCircle,
+    FiCheck,
+    FiChevronRight,
+    FiCopy,
+    FiEdit2,
+    FiFileText,
+    FiPackage,
+    FiPlus,
+    FiServer,
+    FiUploadCloud,
+    FiZap,
+} from "react-icons/fi";
+import { motion } from "framer-motion";
+import { apiUrl } from "../../hooks/useApi";
 
-export default function StepDeployment({ 
-  selectedWorkspace, 
-  selectedPipeline, 
-  deploymentStrategy, 
-  deploymentPackage, 
-  setDeploymentPackage, 
-  fabricAccessToken,
-  onNext 
-}) {
-  const [isDragging, setIsDragging] = useState(false);
-  const [status, setStatus] = useState('idle'); // idle | deploying | success | error
-  const [error, setError] = useState(null);
-  const [newPipelineName, setNewPipelineName] = useState(selectedPipeline?.name ? `${selectedPipeline.name}_cloned` : 'New_Fabric_Pipeline');
-  const [sourceParams, setSourceParams] = useState({ connection_id: '', relative_url: '', method: 'GET' });
-  const [sinkParams, setSinkParams] = useState({ connection_id: '', relative_url: '', method: 'POST' });
-  const [deployLogs, setDeployLogs] = useState([]);
-  const [isRecoveringToken, setIsRecoveringToken] = useState(false);
+const CONNECTOR_TYPES = [
+    "REST",
+    "Lakehouse",
+    "CSV",
+    "DelimitedText",
+    "SQL",
+    "ADLS",
+    "JSON",
+    "Parquet",
+];
 
-  // Reset status if strategy changes
-  useEffect(() => {
-    setStatus('idle');
-    setError(null);
-    setDeployLogs([]);
-  }, [deploymentStrategy]);
-
-  // Attempt token recovery if missing
-  useEffect(() => {
-    const recoverToken = async () => {
-      if (!fabricAccessToken) {
-        setIsRecoveringToken(true);
-        try {
-          console.log("DEPLOYMENT: Attempting token recovery from backend...");
-          const response = await fetch(apiUrl('/auth/fabric/token'));
-          const data = await response.json();
-          if (data.accessToken) {
-            console.log("DEPLOYMENT: Token recovered successfully");
-            // Note: We can't update props directly, but the stepper will handle it 
-            // if we add a mechanism or just use the local recovered token if possible.
-            // For now, let's assume the stepper's restore effect will eventually 
-            // pass the new token down, or we can just use the backend's cache
-            // which we already set up to be checked by the resolver.
-          }
-        } catch (e) {
-          console.warn("DEPLOYMENT: Token recovery failed", e);
-        } finally {
-          setIsRecoveringToken(false);
-        }
-      }
-    };
-    recoverToken();
-  }, [fabricAccessToken]);
-
-  const addLog = (msg) => setDeployLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg }]);
-
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) processFile(file);
-  };
-
-  const processFile = (file) => {
-    if (!file.name.endsWith('.zip')) {
-      setError('Only .zip files are supported for Fabric deployment packages.');
-      return;
+function defaultParams(strategy) {
+    if (strategy === "MODIFY_SINK") {
+        return '{\n  "connection_id": "",\n  "relative_url": "/posts",\n  "request_method": "POST"\n}';
     }
+    return '{\n  "base_url": "https://jsonplaceholder.typicode.com",\n  "relative_url": "/posts",\n  "request_method": "GET"\n}';
+}
 
-    setStatus('uploading');
-    setError(null);
-
-    // Simulate file processing
-    setTimeout(() => {
-      setDeploymentPackage({
-        name: file.name,
-        file: file, // Store the actual file object
-        size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
-        uploadedAt: new Date().toISOString(),
-        manifest: {
-          version: "1.0",
-          type: "fabric-pipeline",
-          includes: ["pipeline-content.json", "metadata.json", "notebooks/"]
-        }
-      });
-      setStatus('idle');
-    }, 1200);
-  };
-
-  const executeDeployment = async () => {
-    console.log("DEPLOY CLICKED");
-    const payload = {
-      workspaceId: selectedWorkspace?.id,
-      targetWorkspace: selectedWorkspace?.name || selectedWorkspace?.displayName,
-      deploymentMode: deploymentStrategy,
-      requestedPipelineName: ['CLONE', 'MODIFY_SOURCE', 'MODIFY_SINK'].includes(deploymentStrategy) ? newPipelineName : (deploymentPackage?.name || selectedPipeline?.name),
-      sourcePipelineId: selectedPipeline?.id
-    };
-    console.log("DEPLOY PAYLOAD", payload);
-    
-    setStatus('deploying');
-    setDeployLogs([]);
-    addLog(`Initiating ${deploymentStrategy} flow...`);
-
+function parseParams(text, label) {
     try {
-      // Step 1: Validation
-      addLog("Validating Fabric workspace permissions...");
-      // If token is missing, the backend will still try to resolve it from cache.
-      // We only throw here if we are absolutely sure we can't get it.
-      // Let's pass what we have (even if null) and let the backend resolver try.
-      
-      // Step 2: Deployment via Backend
-      let response;
-      if (deploymentStrategy === 'CREATE_NEW') {
-        if (!deploymentPackage?.file) {
-           throw new Error("Deployment package file is missing. Please re-upload.");
-        }
-        const formData = new FormData();
-        if (fabricAccessToken) formData.append('access_token', fabricAccessToken);
-        formData.append('target_workspace_id', selectedWorkspace?.id);
-        formData.append('zip_file', deploymentPackage.file);
-        formData.append('pipeline_name', deploymentPackage.name.replace('.zip', ''));
-        
-        addLog(`Uploading package '${deploymentPackage.name}' to backend...`);
-        response = await fetch(apiUrl('/deploy/execute'), {
-          method: 'POST',
-          body: formData
-        });
-      } else if (deploymentStrategy === 'CLONE') {
-        addLog(`Executing clone for ${selectedPipeline?.name}...`);
-        const formData = new FormData();
-        formData.append('source_workspace_id', selectedWorkspace?.id);
-        formData.append('source_pipeline_id', selectedPipeline?.id);
-        formData.append('target_workspace_id', selectedWorkspace?.id);
-        formData.append('new_name', newPipelineName);
-        
-        response = await fetch(apiUrl('/fabric/clone'), {
-          method: 'POST',
-          headers: fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {},
-          body: formData
-        });
-      } else if (deploymentStrategy === 'REUSE') {
-        addLog(`Reusing pipeline ${selectedPipeline?.name}...`);
-        response = await fetch(apiUrl('/fabric/reuse'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
-          },
-          body: JSON.stringify({
-            workspace_id: selectedWorkspace?.id,
-            pipeline_id: selectedPipeline?.id
-          })
-        });
-      } else if (deploymentStrategy === 'MODIFY_SOURCE') {
-        addLog(`Replacing source for ${selectedPipeline?.name}...`);
-        response = await fetch(apiUrl('/fabric/modify-source'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
-          },
-          body: JSON.stringify({
-            workspace_id: selectedWorkspace?.id,
-            pipeline_id: selectedPipeline?.id,
-            new_name: newPipelineName,
-            source_params: sourceParams
-          })
-        });
-      } else if (deploymentStrategy === 'MODIFY_SINK') {
-        addLog(`Replacing sink for ${selectedPipeline?.name}...`);
-        response = await fetch(apiUrl('/fabric/modify-sink'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(fabricAccessToken ? { 'Authorization': `Bearer ${fabricAccessToken}` } : {})
-          },
-          body: JSON.stringify({
-            workspace_id: selectedWorkspace?.id,
-            pipeline_id: selectedPipeline?.id,
-            new_name: newPipelineName,
-            sink_params: sinkParams
-          })
-        });
-      } else {
-        throw new Error(`Strategy ${deploymentStrategy} is not yet implemented with a real backend call.`);
-      }
-
-      const result = await response.json();
-      console.log("DEPLOY RESPONSE", result);
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Deployment failed");
-      }
-
-      const deployedName = result.pipeline_deployed || result.displayName || selectedPipeline?.name;
-      const deployedId = result.id || result.pipeline_id || (result.fabric_response?.id) || selectedPipeline?.id;
-
-      addLog(`Fabric Deployment Successful: ${deployedName}`);
-      addLog(`Item ID: ${deployedId}`);
-      
-      setStatus('success');
-      // Store the result ID for the next steps
-      if (setDeploymentPackage) {
-        setDeploymentPackage({
-          ...deploymentPackage,
-          deployedId: deployedId,
-          deployedName: deployedName
-        });
-      }
-    } catch (e) {
-      console.error("DEPLOY ERROR", e);
-      setError(e.message || "Deployment failed: Could not connect to Fabric API.");
-      setStatus('error');
+        return JSON.parse(text || "{}");
+    } catch {
+        throw new Error(`${label} must be valid JSON.`);
     }
-  };
+}
 
-  if (status === 'success') {
-    return (
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="step-body success-view"
-        style={{ textAlign: 'center', padding: '60px 40px' }}
-      >
-        <div className="success-icon-container" style={{ margin: '0 auto 24px', width: 80, height: 80, background: '#f0fdf4', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <FiCheck size={40} color="#16a34a" />
-        </div>
-        <h2 style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>Deployment Successful</h2>
-        <p style={{ color: '#64748b', marginBottom: 40 }}>The pipeline has been engineered and deployed to your Fabric workspace.</p>
-
-        <div className="pi-card pi-wide" style={{ background: '#f8fafc', border: '1px solid #e2e8f0', textAlign: 'left' }}>
-          <div className="deployment-context-grid">
-            <div className="context-item">
-              <span className="context-label">Workspace</span>
-              <span className="context-value">{selectedWorkspace?.name || selectedWorkspace?.displayName || 'Fabric Workspace'}</span>
-            </div>
-            <div className="context-item">
-              <span className="context-label">Pipeline</span>
-              <span className="context-value" style={{ color: '#2563eb', fontWeight: 800 }}>{deploymentPackage?.deployedName || newPipelineName}</span>
-            </div>
-            <div className="context-item">
-              <span className="context-label">Strategy</span>
-              <span className="context-value pi-tag active" style={{ background: '#eff6ff', color: '#2563eb', border: '1px solid #dbeafe', padding: '2px 8px', borderRadius: 6, fontSize: 11, width: 'fit-content' }}>
-                {deploymentStrategy?.replace(/_/g, ' ')}
-              </span>
-            </div>
-            <div className="context-item">
-              <span className="context-label">Item ID</span>
-              <span className="context-value" style={{ fontFamily: 'monospace', fontSize: 11, color: '#64748b' }}>{deploymentPackage?.deployedId || 'Pending'}</span>
-            </div>
-          </div>
-        </div>
-
-        <button className="orch-btn primary" style={{ marginTop: 40, width: 240 }} onClick={onNext}>
-          Continue to Configuration <FiChevronRight style={{ marginLeft: 8 }} />
-        </button>
-      </motion.div>
+export default function StepDeployment({
+    selectedWorkspace,
+    selectedPipeline,
+    deploymentStrategy,
+    deploymentPackage,
+    setDeploymentPackage,
+    fabricAccessToken,
+    onNext,
+}) {
+    const [status, setStatus] = useState("idle");
+    const [error, setError] = useState(null);
+    const [logs, setLogs] = useState([]);
+    const [isDragging, setIsDragging] = useState(false);
+    const [cloneName, setCloneName] = useState(
+        selectedPipeline?.name ? `${selectedPipeline.name}_clone` : "MyClone",
     );
-  }
+    const [sourceType, setSourceType] = useState("REST");
+    const [sinkType, setSinkType] = useState("REST");
+    const [sourceParamsText, setSourceParamsText] = useState(
+        defaultParams("MODIFY_SOURCE"),
+    );
+    const [sinkParamsText, setSinkParamsText] = useState(
+        defaultParams("MODIFY_SINK"),
+    );
+    const [sourceConnectionName, setSourceConnectionName] = useState("");
+    const [sinkConnectionName, setSinkConnectionName] = useState("");
+    const [templatePipelineId, setTemplatePipelineId] = useState("");
 
-  return (
-    <div className="step-body">
-      {/* Header Summary */}
-      <div className="deployment-summary pi-card pi-wide" style={{ marginBottom: 24, borderLeft: '4px solid #2563eb' }}>
-        <div className="pi-card-title"><FiServer /> Deployment Context</div>
-        <div className="deployment-context-grid">
-          <div className="context-item">
-            <span className="context-label">Workspace</span>
-            <span className="context-value">{selectedWorkspace?.name || selectedWorkspace?.displayName || 'Smax_MVP'}</span>
-          </div>
-          <div className="context-item">
-            <span className="context-label">Source Pipeline</span>
-            <span className="context-value">{selectedPipeline?.name || selectedPipeline?.displayName || 'None (New)'}</span>
-          </div>
-          <div className="context-item">
-            <span className="context-label">Selected Strategy</span>
-            <span className="context-value pi-tag active" style={{ background: '#eff6ff', color: '#2563eb', border: '1px solid #dbeafe' }}>
-              {deploymentStrategy?.replace(/_/g, ' ') || 'REUSE'}
-            </span>
-          </div>
-        </div>
-      </div>
+    const workspaceId =
+        selectedWorkspace?.workspace_id || selectedWorkspace?.id || "";
+    const pipelineItemId =
+        selectedPipeline?.pipeline_item_id || selectedPipeline?.id || "";
+    const workspaceName =
+        selectedWorkspace?.workspace_name ||
+        selectedWorkspace?.name ||
+        selectedWorkspace?.displayName ||
+        "";
+    const pipelineName =
+        selectedPipeline?.pipeline_name ||
+        selectedPipeline?.name ||
+        selectedPipeline?.displayName ||
+        "";
 
-      {/* STRATEGY: CREATE_NEW */}
-      {deploymentStrategy === 'CREATE_NEW' && (
-        <div className="strategy-section">
-          <div className="section-header" style={{ marginBottom: 20 }}>
-            <h3 style={{ fontSize: 17, fontWeight: 800, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <FiPlus color="#2563eb" /> Create New Pipeline
-            </h3>
-            <p style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>Upload a ZIP export of a Fabric pipeline to deploy it as a new item.</p>
-          </div>
+    useEffect(() => {
+        setStatus("idle");
+        setError(null);
+        setLogs([]);
+        setSourceParamsText(defaultParams("MODIFY_SOURCE"));
+        setSinkParamsText(defaultParams("MODIFY_SINK"));
+    }, [deploymentStrategy]);
 
-          {!deploymentPackage ? (
-            <div 
-              className={`upload-zone ${isDragging ? 'dragging' : ''} ${status === 'uploading' ? 'loading' : ''}`}
-              onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={(e) => { e.preventDefault(); setIsDragging(false); const file = e.dataTransfer.files[0]; if (file) processFile(file); }}
+    // Auto-inspect selected pipeline to prefill connector types and params
+    useEffect(() => {
+        const shouldInspect =
+            (deploymentStrategy === "MODIFY_SOURCE" ||
+                deploymentStrategy === "MODIFY_SINK") &&
+            !!pipelineItemId &&
+            !!workspaceId;
+        if (!shouldInspect) return;
+        let mounted = true;
+        (async () => {
+            try {
+                // Try to obtain a token from backend if frontend doesn't have one
+                let tokenToUse = fabricAccessToken || null;
+                if (!tokenToUse) {
+                    try {
+                        const tResp = await fetch(
+                            apiUrl("/auth/fabric/token"),
+                            { cache: "no-store" },
+                        );
+                        if (tResp.ok) {
+                            const tb = await tResp.json();
+                            tokenToUse = tb?.accessToken || null;
+                        }
+                    } catch (err) {
+                        // ignore
+                    }
+                }
+
+                const resp = await fetch(apiUrl("/fabric/inspect"), {
+                    method: "POST",
+                    headers: authHeaders(true, tokenToUse),
+                    body: JSON.stringify({
+                        workspace_id: workspaceId,
+                        pipeline_id: pipelineItemId,
+                    }),
+                });
+                if (!resp.ok) return; // keep defaults
+                const body = await resp.json();
+                if (!mounted) return;
+                const activities =
+                    body.activities ||
+                    body.pipeline?.properties?.activities ||
+                    [];
+                // Prefer first copy activity
+                const copy =
+                    activities.find((a) => a.type === "Copy") ||
+                    activities[0] ||
+                    null;
+                if (!copy) return;
+                const role =
+                    deploymentStrategy === "MODIFY_SOURCE" ? "source" : "sink";
+                const roleInfo = (copy.typeProperties || {})[role] || {};
+                const detected =
+                    roleInfo.connector_type ||
+                    roleInfo.raw_type ||
+                    (body[`detected_${role}_types`] &&
+                        body[`detected_${role}_types`][0]) ||
+                    "";
+                // Only set defaults if user hasn't already changed selection from initial default
+                if (deploymentStrategy === "MODIFY_SOURCE") {
+                    setSourceType((prev) =>
+                        prev === "REST" ? detected || prev : prev,
+                    );
+                } else {
+                    setSinkType((prev) =>
+                        prev === "REST" ? detected || prev : prev,
+                    );
+                }
+
+                // Prefill params based on datasetSettings
+                const ds = roleInfo.datasetSettings || {};
+                const ext = ds.externalReferences || {};
+                const tprops = ds.typeProperties || {};
+                const guessed = {};
+                if (ext.connection) guessed.connection_id = ext.connection;
+                if (tprops.relativeUrl)
+                    guessed.relative_url = tprops.relativeUrl;
+                // For file-based datasets
+                if (tprops.location) {
+                    guessed.file_name =
+                        tprops.location.fileName ||
+                        tprops.location["fileName"] ||
+                        "";
+                    guessed.folder_path =
+                        tprops.location.folderPath ||
+                        tprops.location["folderPath"] ||
+                        "";
+                    guessed.file_system =
+                        tprops.location.fileSystem ||
+                        tprops.location["fileSystem"] ||
+                        "";
+                }
+                // If we detected a known type like DelimitedText, set format hints
+                if (
+                    (detected || "").toLowerCase().includes("delimited") ||
+                    (detected || "").toLowerCase().includes("csv")
+                ) {
+                    guessed.format = "CSV";
+                    guessed.delimiter = ",";
+                }
+                // Only set the params text if we created some guessed keys
+                if (Object.keys(guessed).length > 0) {
+                    const text = JSON.stringify(guessed, null, 2);
+                    if (deploymentStrategy === "MODIFY_SOURCE")
+                        setSourceParamsText(text);
+                    else setSinkParamsText(text);
+                }
+            } catch (e) {
+                // ignore inspect failures, leave defaults
+                console.warn("Pipeline inspect failed", e);
+            }
+        })();
+        return () => {
+            mounted = false;
+        };
+    }, [deploymentStrategy, pipelineItemId, workspaceId]);
+
+    const addLog = (msg) =>
+        setLogs((prev) => [
+            ...prev,
+            { time: new Date().toLocaleTimeString(), msg },
+        ]);
+    const authHeaders = (json = false, overrideToken = null) => ({
+        ...(json ? { "Content-Type": "application/json" } : {}),
+        ...(overrideToken || fabricAccessToken
+            ? { Authorization: `Bearer ${overrideToken || fabricAccessToken}` }
+            : {}),
+    });
+
+    const processFile = (file) => {
+        if (!file.name.endsWith(".zip")) {
+            setError(
+                "Only .zip files are supported for Fabric deployment packages.",
+            );
+            return;
+        }
+        setDeploymentPackage?.({
+            name: file.name,
+            file,
+            size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+            uploadedAt: new Date().toISOString(),
+            manifest: {
+                includes: [
+                    "pipeline-content.json",
+                    "metadata.json",
+                    "notebooks/",
+                ],
+            },
+        });
+    };
+
+    const executeDeployment = async () => {
+        setStatus("deploying");
+        setError(null);
+        setLogs([]);
+        addLog(`Starting ${deploymentStrategy} deployment...`);
+
+        try {
+            // Ensure we have a usable Fabric token. If `fabricAccessToken` isn't provided
+            // attempt to fetch a cached/refreshed token from the backend.
+            let tokenToUse = fabricAccessToken || null;
+            if (!tokenToUse) {
+                try {
+                    const tResp = await fetch(apiUrl("/auth/fabric/token"), {
+                        cache: "no-store",
+                    });
+                    if (tResp.ok) {
+                        const tb = await tResp.json();
+                        tokenToUse = tb?.accessToken || null;
+                    }
+                } catch (err) {
+                    // ignore token fetch errors; we'll let server return 401 for unauthenticated
+                }
+            }
+            let response;
+            if (deploymentStrategy === "CREATE_NEW") {
+                if (!deploymentPackage?.file)
+                    throw new Error("Deployment package file is missing.");
+                const formData = new FormData();
+                if (fabricAccessToken)
+                    formData.append("access_token", fabricAccessToken);
+                formData.append("target_workspace_id", workspaceId);
+                if (workspaceName)
+                    formData.append("workspace_name", workspaceName);
+                formData.append("zip_file", deploymentPackage.file);
+                formData.append(
+                    "pipeline_name",
+                    deploymentPackage.name.replace(".zip", ""),
+                );
+                response = await fetch(apiUrl("/deploy/execute"), {
+                    method: "POST",
+                    body: formData,
+                });
+            } else if (deploymentStrategy === "CLONE") {
+                const formData = new FormData();
+                formData.append("source_workspace_id", workspaceId);
+                formData.append("source_pipeline_id", pipelineItemId);
+                formData.append("target_workspace_id", workspaceId);
+                if (workspaceName)
+                    formData.append("workspace_name", workspaceName);
+                if (pipelineName)
+                    formData.append("pipeline_name", pipelineName);
+                formData.append("new_name", cloneName);
+                response = await fetch(apiUrl("/fabric/clone"), {
+                    method: "POST",
+                    headers: authHeaders(false, tokenToUse),
+                    body: formData,
+                });
+            } else if (deploymentStrategy === "REUSE") {
+                response = await fetch(apiUrl("/fabric/reuse"), {
+                    method: "POST",
+                    headers: authHeaders(true, tokenToUse),
+                    body: JSON.stringify({
+                        workspace_id: workspaceId,
+                        workspace_name: workspaceName,
+                        pipeline_id: pipelineItemId,
+                        pipeline_item_id: pipelineItemId,
+                        pipeline_name: pipelineName,
+                    }),
+                });
+            } else if (deploymentStrategy === "MODIFY_SOURCE") {
+                response = await fetch(apiUrl("/fabric/modify-source"), {
+                    method: "POST",
+                    headers: authHeaders(true, tokenToUse),
+                    body: JSON.stringify({
+                        workspace_id: workspaceId,
+                        workspace_name: workspaceName,
+                        pipeline_id: pipelineItemId,
+                        pipeline_item_id: pipelineItemId,
+                        pipeline_name: pipelineName,
+                        clone_name: cloneName,
+                        mode: "source",
+                        source_type: sourceType || null,
+                        source_params: parseParams(
+                            sourceParamsText,
+                            "Source params",
+                        ),
+                        source_connection_name: sourceConnectionName || null,
+                        template_pipeline_id:
+                            templatePipelineId || pipelineItemId || null,
+                    }),
+                });
+            } else if (deploymentStrategy === "MODIFY_SINK") {
+                response = await fetch(apiUrl("/fabric/modify-sink"), {
+                    method: "POST",
+                    headers: authHeaders(true, tokenToUse),
+                    body: JSON.stringify({
+                        workspace_id: workspaceId,
+                        workspace_name: workspaceName,
+                        pipeline_id: pipelineItemId,
+                        pipeline_item_id: pipelineItemId,
+                        pipeline_name: pipelineName,
+                        clone_name: cloneName,
+                        mode: "sink",
+                        sink_type: sinkType || null,
+                        sink_params: parseParams(sinkParamsText, "Sink params"),
+                        sink_connection_name: sinkConnectionName || null,
+                        template_pipeline_id:
+                            templatePipelineId || pipelineItemId || null,
+                    }),
+                });
+            } else {
+                throw new Error(
+                    `Unsupported deployment strategy: ${deploymentStrategy}`,
+                );
+            }
+
+            const result = await response.json();
+            if (!response.ok)
+                throw new Error(
+                    typeof result.detail === "string"
+                        ? result.detail
+                        : JSON.stringify(result.detail || result),
+                );
+            const deployedId =
+                result.cloned_pipeline_id ||
+                result.id ||
+                result.pipeline_id ||
+                result.fabric_response?.id ||
+                selectedPipeline?.id;
+            const deployedName =
+                result.cloned_display_name ||
+                result.displayName ||
+                result.pipeline_deployed ||
+                cloneName;
+            addLog(`Deployment successful: ${deployedName}`);
+            addLog(`Pipeline ID: ${deployedId}`);
+            setDeploymentPackage?.({
+                ...deploymentPackage,
+                deployedId,
+                deployedName,
+            });
+            setStatus("success");
+        } catch (e) {
+            setError(e.message || "Deployment failed.");
+            setStatus("error");
+        }
+    };
+
+    if (status === "success") {
+        return (
+            <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="step-body success-view"
+                style={{ textAlign: "center", padding: "60px 40px" }}
             >
-              <input type="file" id="zip-upload" hidden accept=".zip" onChange={handleFileChange} disabled={status !== 'idle'} />
-              <label htmlFor="zip-upload" style={{ cursor: status !== 'idle' ? 'not-allowed' : 'pointer', padding: '60px 40px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                {status === 'uploading' ? <div className="pi-spinner" /> : <FiUploadCloud size={48} color="#2563eb" />}
-                <div style={{ marginTop: 16, fontWeight: 800 }}>{status === 'uploading' ? 'Processing Package...' : 'Click or Drag ZIP to Upload'}</div>
-                <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>Supports Fabric export bundles (.zip)</div>
-              </label>
-            </div>
-          ) : (
-            <div className="package-preview pi-card pi-wide" style={{ border: '1px solid #e2e8f0' }}>
-               <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                 <div style={{ background: '#eff6ff', padding: 12, borderRadius: 12 }}><FiPackage size={24} color="#2563eb" /></div>
-                 <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 800 }}>{deploymentPackage.name}</div>
-                    <div style={{ fontSize: 12, color: '#64748b' }}>{deploymentPackage.size} · Valid package detected</div>
-                 </div>
-                 <button className="orch-btn ghost tiny" onClick={() => setDeploymentPackage(null)}>Remove</button>
-               </div>
-               <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #f1f5f9', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-                  {deploymentPackage.manifest.includes.map(f => (
-                    <div key={f} style={{ fontSize: 11, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 4 }}><FiFileText size={13} /> {f}</div>
-                  ))}
-               </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* STRATEGY: CLONE */}
-      {deploymentStrategy === 'CLONE' && (
-        <div className="strategy-section pi-card pi-wide" style={{ border: '1px solid #e2e8f0', padding: 24 }}>
-          <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <FiCopy color="#2563eb" /> Clone Pipeline
-          </h3>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 800, color: '#64748b' }}>New Pipeline Name</span>
-            <input 
-              className="orch-input" 
-              value={newPipelineName} 
-              onChange={(e) => setNewPipelineName(e.target.value)} 
-              placeholder="Enter pipeline name..."
-              style={{ padding: '12px 16px', fontSize: 15 }}
-            />
-          </label>
-          <div style={{ marginTop: 16, fontSize: 13, color: '#64748b', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <FiZap color="#f59e0b" /> This will duplicate the logic of <strong>{selectedPipeline?.name}</strong> and assign new identifiers.
-          </div>
-        </div>
-      )}
-
-      {/* STRATEGY: MODIFY_SOURCE */}
-      {deploymentStrategy === 'MODIFY_SOURCE' && (
-        <div className="strategy-section pi-card pi-wide" style={{ border: '1px solid #e2e8f0', padding: 24 }}>
-          <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <FiEdit2 color="#2563eb" /> Modify Source
-          </h3>
-          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Replace the Copy activity REST source while preserving mappings, policy, and dependencies.</p>
-          <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
-            <input className="orch-input" placeholder="New pipeline name" value={newPipelineName} onChange={(e) => setNewPipelineName(e.target.value)} />
-            <input className="orch-input" placeholder="Fabric REST connection id" value={sourceParams.connection_id} onChange={(e) => setSourceParams(prev => ({ ...prev, connection_id: e.target.value }))} />
-            <input className="orch-input" placeholder="Relative URL, e.g. /v1/orders" value={sourceParams.relative_url} onChange={(e) => setSourceParams(prev => ({ ...prev, relative_url: e.target.value }))} />
-            <input className="orch-input" placeholder="Method" value={sourceParams.method} onChange={(e) => setSourceParams(prev => ({ ...prev, method: e.target.value }))} />
-          </div>
-          
-          <div className="simulated-editor" style={{ background: '#0f172a', borderRadius: 12, padding: 20, color: '#94a3b8', fontFamily: 'monospace', fontSize: 12 }}>
-            <div style={{ color: '#38bdf8' }}>{"{"}</div>
-            <div style={{ paddingLeft: 20 }}>"name": <span style={{ color: '#fbbf24' }}>"{selectedPipeline?.name}"</span>,</div>
-            <div style={{ paddingLeft: 20 }}>"activities": [</div>
-            <div style={{ paddingLeft: 40 }}><span style={{ color: '#38bdf8' }}>{"{"}</span> "name": "CopyData", "type": "Copy" <span style={{ color: '#38bdf8' }}>{"}"}</span>,</div>
-            <div style={{ paddingLeft: 40 }}><span style={{ color: '#38bdf8' }}>{"{"}</span> "name": "Notebook", "type": "Notebook" <span style={{ color: '#38bdf8' }}>{"}"}</span></div>
-            <div style={{ paddingLeft: 20 }}>],</div>
-            <div style={{ paddingLeft: 20 }}>"parameters": <span style={{ color: '#38bdf8' }}>{"{ ... }"}</span></div>
-            <div style={{ color: '#38bdf8' }}>{"}"}</div>
-          </div>
-          <div style={{ marginTop: 16, textAlign: 'right' }}>
-            <span style={{ fontSize: 12, color: '#94a3b8' }}>Advanced Activity Editor →</span>
-          </div>
-        </div>
-      )}
-
-      {/* STRATEGY: MODIFY_SINK */}
-      {deploymentStrategy === 'MODIFY_SINK' && (
-        <div className="strategy-section pi-card pi-wide" style={{ border: '1px solid #e2e8f0', padding: 24 }}>
-          <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <FiEdit2 color="#2563eb" /> Modify Sink
-          </h3>
-          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20 }}>Replace the Copy activity REST sink while preserving mappings, policy, and dependencies.</p>
-          <div style={{ display: 'grid', gap: 12 }}>
-            <input className="orch-input" placeholder="New pipeline name" value={newPipelineName} onChange={(e) => setNewPipelineName(e.target.value)} />
-            <input className="orch-input" placeholder="Fabric REST connection id" value={sinkParams.connection_id} onChange={(e) => setSinkParams(prev => ({ ...prev, connection_id: e.target.value }))} />
-            <input className="orch-input" placeholder="Relative URL, e.g. /v1/target" value={sinkParams.relative_url} onChange={(e) => setSinkParams(prev => ({ ...prev, relative_url: e.target.value }))} />
-            <input className="orch-input" placeholder="Method" value={sinkParams.method} onChange={(e) => setSinkParams(prev => ({ ...prev, method: e.target.value }))} />
-          </div>
-        </div>
-      )}
-
-      {/* STRATEGY: REUSE */}
-      {deploymentStrategy === 'REUSE' && (
-        <div className="strategy-section pi-card pi-wide" style={{ background: '#f0f9ff', border: '1px solid #bae6fd', padding: 24 }}>
-          <div style={{ display: 'flex', gap: 16 }}>
-             <div style={{ background: '#fff', width: 48, height: 48, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #bae6fd' }}>
-                <FiZap color="#0284c7" size={24} />
-             </div>
-             <div>
-                <h3 style={{ fontSize: 17, fontWeight: 800, margin: '0 0 4px', color: '#0369a1' }}>Pattern Reuse Mode</h3>
-                <p style={{ fontSize: 13, color: '#0369a1', opacity: 0.8, margin: 0 }}>
-                  Using existing orchestration flow. No new pipeline will be created. We will continue directly to source configuration.
-                </p>
-             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Deploying Progress */}
-      {status === 'deploying' && (
-        <div className="deploying-overlay" style={{ marginTop: 24, padding: 24, background: '#f8fafc', borderRadius: 16, border: '1px solid #e2e8f0' }}>
-           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-              <div className="pi-spinner" style={{ width: 20, height: 20 }} />
-              <div style={{ fontWeight: 800, fontSize: 15 }}>Orchestration Engineering in Progress...</div>
-           </div>
-           <div className="deploy-logs" style={{ background: '#fff', border: '1px solid #f1f5f9', borderRadius: 8, padding: 12, maxHeight: 120, overflowY: 'auto' }}>
-              {deployLogs.map((log, i) => (
-                <div key={i} style={{ fontSize: 11, color: '#64748b', marginBottom: 4, fontFamily: 'monospace' }}>
-                   <span style={{ color: '#94a3b8' }}>[{log.time}]</span> {log.msg}
+                <div
+                    style={{
+                        margin: "0 auto 24px",
+                        width: 80,
+                        height: 80,
+                        background: "#f0fdf4",
+                        borderRadius: "50%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                    }}
+                >
+                    <FiCheck size={40} color="#16a34a" />
                 </div>
-              ))}
-           </div>
+                <h2 style={{ fontSize: 24, fontWeight: 900, marginBottom: 8 }}>
+                    Deployment Successful
+                </h2>
+                <p style={{ color: "#64748b", marginBottom: 40 }}>
+                    Fabric deployment completed.
+                </p>
+                <button
+                    className="orch-btn primary"
+                    style={{ width: 240 }}
+                    onClick={onNext}
+                >
+                    Continue to Review{" "}
+                    <FiChevronRight style={{ marginLeft: 8 }} />
+                </button>
+            </motion.div>
+        );
+    }
+
+    return (
+        <div className="step-body">
+            <div
+                className="deployment-summary pi-card pi-wide"
+                style={{ marginBottom: 24, borderLeft: "4px solid #2563eb" }}
+            >
+                <div className="pi-card-title">
+                    <FiServer /> Deployment Context
+                </div>
+                <div className="deployment-context-grid">
+                    <div className="context-item">
+                        <span className="context-label">Workspace</span>
+                        <span className="context-value">
+                            {selectedWorkspace?.name ||
+                                selectedWorkspace?.displayName ||
+                                selectedWorkspace?.id}
+                        </span>
+                    </div>
+                    <div className="context-item">
+                        <span className="context-label">Pipeline</span>
+                        <span className="context-value">
+                            {selectedPipeline?.name ||
+                                selectedPipeline?.displayName ||
+                                selectedPipeline?.id}
+                        </span>
+                    </div>
+                    <div className="context-item">
+                        <span className="context-label">Strategy</span>
+                        <span className="context-value">
+                            {deploymentStrategy?.replace(/_/g, " ")}
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            {deploymentStrategy === "CREATE_NEW" && (
+                <div
+                    className="strategy-section pi-card pi-wide"
+                    style={{ padding: 24 }}
+                >
+                    <h3
+                        style={{
+                            fontSize: 17,
+                            fontWeight: 800,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                        }}
+                    >
+                        <FiPlus color="#2563eb" /> Create New Pipeline
+                    </h3>
+                    {!deploymentPackage ? (
+                        <div
+                            className={`upload-zone ${isDragging ? "dragging" : ""}`}
+                            onDragOver={(e) => {
+                                e.preventDefault();
+                                setIsDragging(true);
+                            }}
+                            onDragLeave={() => setIsDragging(false)}
+                            onDrop={(e) => {
+                                e.preventDefault();
+                                setIsDragging(false);
+                                if (e.dataTransfer.files[0])
+                                    processFile(e.dataTransfer.files[0]);
+                            }}
+                        >
+                            <input
+                                type="file"
+                                id="zip-upload"
+                                hidden
+                                accept=".zip"
+                                onChange={(e) =>
+                                    e.target.files[0] &&
+                                    processFile(e.target.files[0])
+                                }
+                            />
+                            <label
+                                htmlFor="zip-upload"
+                                style={{
+                                    cursor: "pointer",
+                                    padding: "60px 40px",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    alignItems: "center",
+                                }}
+                            >
+                                <FiUploadCloud size={48} color="#2563eb" />
+                                <div style={{ marginTop: 16, fontWeight: 800 }}>
+                                    Click or Drag ZIP to Upload
+                                </div>
+                            </label>
+                        </div>
+                    ) : (
+                        <div className="package-preview pi-card pi-wide">
+                            <div
+                                style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 16,
+                                }}
+                            >
+                                <FiPackage size={24} color="#2563eb" />
+                                <div style={{ flex: 1 }}>
+                                    <strong>{deploymentPackage.name}</strong>
+                                    <div
+                                        style={{
+                                            fontSize: 12,
+                                            color: "#64748b",
+                                        }}
+                                    >
+                                        {deploymentPackage.size}
+                                    </div>
+                                </div>
+                                <button
+                                    className="orch-btn ghost tiny"
+                                    onClick={() => setDeploymentPackage(null)}
+                                >
+                                    Remove
+                                </button>
+                            </div>
+                            <div
+                                style={{
+                                    marginTop: 12,
+                                    display: "flex",
+                                    gap: 10,
+                                    flexWrap: "wrap",
+                                }}
+                            >
+                                {deploymentPackage.manifest.includes.map(
+                                    (item) => (
+                                        <span
+                                            key={item}
+                                            style={{
+                                                fontSize: 11,
+                                                color: "#64748b",
+                                            }}
+                                        >
+                                            <FiFileText /> {item}
+                                        </span>
+                                    ),
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {deploymentStrategy === "CLONE" && (
+                <div
+                    className="strategy-section pi-card pi-wide"
+                    style={{ padding: 24 }}
+                >
+                    <h3
+                        style={{
+                            fontSize: 17,
+                            fontWeight: 800,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                        }}
+                    >
+                        <FiCopy color="#2563eb" /> Clone Pipeline
+                    </h3>
+                    <label className="context-label">Clone Name</label>
+                    <input
+                        className="orch-input"
+                        value={cloneName}
+                        onChange={(e) => setCloneName(e.target.value)}
+                    />
+                </div>
+            )}
+
+            {deploymentStrategy === "REUSE" && (
+                <div
+                    className="strategy-section pi-card pi-wide"
+                    style={{
+                        padding: 24,
+                        background: "#f0f9ff",
+                        border: "1px solid #bae6fd",
+                    }}
+                >
+                    <h3 style={{ color: "#0369a1" }}>
+                        <FiZap /> Reuse Existing
+                    </h3>
+                    <p style={{ fontSize: 13, color: "#0369a1" }}>
+                        Reuse the selected pipeline as-is.
+                    </p>
+                </div>
+            )}
+
+            {(deploymentStrategy === "MODIFY_SOURCE" ||
+                deploymentStrategy === "MODIFY_SINK") && (
+                <div
+                    className="strategy-section pi-card pi-wide"
+                    style={{ padding: 24 }}
+                >
+                    <h3
+                        style={{
+                            fontSize: 17,
+                            fontWeight: 800,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                        }}
+                    >
+                        <FiEdit2 color="#2563eb" />{" "}
+                        {deploymentStrategy === "MODIFY_SOURCE"
+                            ? "Modify Source"
+                            : "Modify Sink"}
+                    </h3>
+                    <p style={{ fontSize: 13, color: "#64748b" }}>
+                        Mirrors the working `pipe_chg_src` clone command: clone
+                        name, mode, connector type, params JSON, optional
+                        connection name, optional template pipeline ID.
+                    </p>
+                    <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+                        <label className="context-label">Clone Name</label>
+                        <input
+                            className="orch-input"
+                            value={cloneName}
+                            onChange={(e) => setCloneName(e.target.value)}
+                        />
+
+                        <label className="context-label">
+                            {deploymentStrategy === "MODIFY_SOURCE"
+                                ? "Source Type"
+                                : "Sink Type"}
+                        </label>
+                        <select
+                            className="orch-input"
+                            value={
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? sourceType
+                                    : sinkType
+                            }
+                            onChange={(e) =>
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? setSourceType(e.target.value)
+                                    : setSinkType(e.target.value)
+                            }
+                        >
+                            {CONNECTOR_TYPES.map((type) => (
+                                <option key={type} value={type}>
+                                    {type}
+                                </option>
+                            ))}
+                        </select>
+
+                        <label className="context-label">
+                            {deploymentStrategy === "MODIFY_SOURCE"
+                                ? "Source Params JSON"
+                                : "Sink Params JSON"}
+                        </label>
+                        <textarea
+                            className="orch-input"
+                            style={{
+                                minHeight: 160,
+                                fontFamily: "monospace",
+                                fontSize: 12,
+                            }}
+                            value={
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? sourceParamsText
+                                    : sinkParamsText
+                            }
+                            onChange={(e) =>
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? setSourceParamsText(e.target.value)
+                                    : setSinkParamsText(e.target.value)
+                            }
+                        />
+
+                        <label className="context-label">
+                            {deploymentStrategy === "MODIFY_SOURCE"
+                                ? "Source Connection Name"
+                                : "Sink Connection Name"}
+                        </label>
+                        <input
+                            className="orch-input"
+                            value={
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? sourceConnectionName
+                                    : sinkConnectionName
+                            }
+                            onChange={(e) =>
+                                deploymentStrategy === "MODIFY_SOURCE"
+                                    ? setSourceConnectionName(e.target.value)
+                                    : setSinkConnectionName(e.target.value)
+                            }
+                            placeholder="Optional"
+                        />
+
+                        <label className="context-label">
+                            Template Pipeline ID
+                        </label>
+                        <input
+                            className="orch-input"
+                            value={templatePipelineId}
+                            onChange={(e) =>
+                                setTemplatePipelineId(e.target.value)
+                            }
+                            placeholder="Optional pipeline ID to extract REST connection UUID"
+                        />
+                    </div>
+                </div>
+            )}
+
+            {status === "deploying" && (
+                <div
+                    style={{
+                        marginTop: 24,
+                        padding: 24,
+                        background: "#f8fafc",
+                        borderRadius: 16,
+                        border: "1px solid #e2e8f0",
+                    }}
+                >
+                    <strong>Deployment in progress...</strong>
+                    <div
+                        style={{
+                            marginTop: 12,
+                            background: "#fff",
+                            border: "1px solid #f1f5f9",
+                            borderRadius: 8,
+                            padding: 12,
+                            maxHeight: 120,
+                            overflowY: "auto",
+                        }}
+                    >
+                        {logs.map((log, index) => (
+                            <div
+                                key={index}
+                                style={{
+                                    fontSize: 11,
+                                    color: "#64748b",
+                                    fontFamily: "monospace",
+                                }}
+                            >
+                                [{log.time}] {log.msg}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {error && (
+                <div className="pi-error" style={{ marginTop: 16 }}>
+                    <FiAlertCircle /> {error}
+                </div>
+            )}
+
+            <div className="step-footer" style={{ marginTop: 32 }}>
+                <button
+                    className="orch-btn primary deploy-btn"
+                    disabled={
+                        status === "deploying" ||
+                        (deploymentStrategy === "CREATE_NEW" &&
+                            !deploymentPackage) ||
+                        (deploymentStrategy !== "CREATE_NEW" &&
+                            (!workspaceId || !pipelineItemId))
+                    }
+                    onClick={executeDeployment}
+                    style={{ background: "#2563eb", padding: "12px 32px" }}
+                >
+                    {status === "deploying" ? (
+                        "Deploying..."
+                    ) : (
+                        <>
+                            {deploymentStrategy === "CREATE_NEW" && (
+                                <>
+                                    <FiPlus style={{ marginRight: 8 }} /> Create
+                                    & Deploy Pipeline
+                                </>
+                            )}
+                            {deploymentStrategy === "CLONE" && (
+                                <>
+                                    <FiCopy style={{ marginRight: 8 }} /> Clone
+                                    Pipeline
+                                </>
+                            )}
+                            {deploymentStrategy === "REUSE" && (
+                                <>
+                                    <FiZap style={{ marginRight: 8 }} /> Reuse
+                                    Pipeline
+                                </>
+                            )}
+                            {deploymentStrategy === "MODIFY_SOURCE" && (
+                                <>
+                                    <FiEdit2 style={{ marginRight: 8 }} />{" "}
+                                    Modify Source
+                                </>
+                            )}
+                            {deploymentStrategy === "MODIFY_SINK" && (
+                                <>
+                                    <FiEdit2 style={{ marginRight: 8 }} />{" "}
+                                    Modify Sink
+                                </>
+                            )}
+                        </>
+                    )}
+                </button>
+            </div>
+
+            <style jsx>{`
+                .deployment-context-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                    gap: 20px;
+                    margin-top: 12px;
+                }
+                .context-item {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                }
+                .context-label {
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #94a3b8;
+                    text-transform: uppercase;
+                }
+                .context-value {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #1e293b;
+                    word-break: break-word;
+                }
+                .upload-zone {
+                    border: 2px dashed #cbd5e1;
+                    border-radius: 16px;
+                    background: #f8fafc;
+                    transition: all 0.2s ease;
+                }
+                .upload-zone.dragging {
+                    border-color: #2563eb;
+                    background: #eff6ff;
+                }
+            `}</style>
         </div>
-      )}
-
-      {error && (
-        <div className="pi-error" style={{ marginTop: 16 }}>
-          <FiAlertCircle /> {error}
-        </div>
-      )}
-
-      <div className="step-footer" style={{ marginTop: 32 }}>
-           <button 
-             className="orch-btn primary deploy-btn" 
-             disabled={status === 'deploying' || (deploymentStrategy === 'CREATE_NEW' && !deploymentPackage) || (deploymentStrategy !== 'CREATE_NEW' && (!selectedWorkspace?.id || !selectedPipeline?.id))} 
-             onClick={executeDeployment}
-             style={{ background: '#2563eb', padding: '12px 32px' }}
-           >
-             {status === 'deploying' ? 'Deploying...' : (
-               <>
-                 {deploymentStrategy === 'CREATE_NEW' && <><FiPlus style={{ marginRight: 8 }} /> Create & Deploy Pipeline</>}
-                 {deploymentStrategy === 'CLONE' && <><FiCopy style={{ marginRight: 8 }} /> Clone & Deploy Pipeline</>}
-                 {deploymentStrategy === 'REUSE' && <><FiZap style={{ marginRight: 8 }} /> Reuse Pipeline</>}
-                 {deploymentStrategy === 'MODIFY_SOURCE' && <><FiEdit2 style={{ marginRight: 8 }} /> Replace Source & Deploy</>}
-                 {deploymentStrategy === 'MODIFY_SINK' && <><FiEdit2 style={{ marginRight: 8 }} /> Replace Sink & Deploy</>}
-               </>
-             )}
-           </button>
-      </div>
-
-      <style jsx>{`
-        .deployment-context-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-          gap: 20px;
-          margin-top: 12px;
-        }
-        .context-item {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-        .context-label {
-          font-size: 11px;
-          font-weight: 700;
-          color: #94a3b8;
-          text-transform: uppercase;
-        }
-        .context-value {
-          font-size: 14px;
-          font-weight: 600;
-          color: #1e293b;
-        }
-        .upload-zone {
-          border: 2px dashed #cbd5e1;
-          border-radius: 16px;
-          background: #f8fafc;
-          transition: all 0.2s ease;
-        }
-        .upload-zone.dragging {
-          border-color: #2563eb;
-          background: #eff6ff;
-        }
-        .upload-zone.loading {
-          opacity: 0.6;
-        }
-        .deploy-btn:hover {
-          background: #1d4ed8 !important;
-          transform: translateY(-1px);
-          box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
-        }
-      `}</style>
-    </div>
-  );
+    );
 }

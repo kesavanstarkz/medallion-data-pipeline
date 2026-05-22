@@ -20,6 +20,7 @@ from core.logger import setup_logger
 from dotenv import load_dotenv
 from pathlib import Path
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi import UploadFile, File, Form, HTTPException
 from typing import Annotated, Optional
 import json
@@ -151,42 +152,85 @@ from models.target import Client, Target
 # Create tables
 Base.metadata.create_all(bind=engine)
 
+def get_existing_columns(conn, table_name):
+    try:
+        rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+        return [row[1] for row in rows]
+    except Exception:
+        try:
+            rows = conn.execute(text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = :table"
+            ), {"table": table_name}).fetchall()
+            return [row[0] for row in rows]
+        except Exception:
+            return []
+
+
+def add_column_if_missing(conn, table_name, column_name, column_definition):
+    existing_columns = get_existing_columns(conn, table_name)
+    if column_name not in existing_columns:
+        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_definition}"))
+
+
 try:
     from sqlalchemy import text
     with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE master_config_authoritative ADD COLUMN IF NOT EXISTS raw_layer_path TEXT"))
-        
-        # API Source Config Multi-Cloud Migrations
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'API'"))
-        conn.execute(text("ALTER TABLE api_source_config ALTER COLUMN base_url DROP NOT NULL"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS aws_bucket_name TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS aws_region TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS aws_access_key TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS aws_secret_key TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS azure_account_name TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS azure_container_name TEXT"))
-        conn.execute(text("ALTER TABLE api_source_config ADD COLUMN IF NOT EXISTS azure_account_key TEXT"))
+        add_column_if_missing(conn, "master_config_authoritative", "raw_layer_path", "raw_layer_path TEXT")
+        add_column_if_missing(conn, "master_config_authoritative", "schema", "schema TEXT")
+        add_column_if_missing(conn, "master_config", "schema", "schema TEXT")
 
-        conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN expected_data_type DROP NOT NULL"))
-        conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN dq_rule DROP NOT NULL"))
-        conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN severity DROP NOT NULL"))
-        
+        # API Source Config Multi-Cloud Migrations
+        add_column_if_missing(conn, "api_source_config", "source_type", "source_type TEXT DEFAULT 'API'")
+        try:
+            conn.execute(text("ALTER TABLE api_source_config ALTER COLUMN base_url DROP NOT NULL"))
+        except Exception:
+            pass
+        add_column_if_missing(conn, "api_source_config", "aws_bucket_name", "aws_bucket_name TEXT")
+        add_column_if_missing(conn, "api_source_config", "aws_region", "aws_region TEXT")
+        add_column_if_missing(conn, "api_source_config", "aws_access_key", "aws_access_key TEXT")
+        add_column_if_missing(conn, "api_source_config", "aws_secret_key", "aws_secret_key TEXT")
+        add_column_if_missing(conn, "api_source_config", "azure_account_name", "azure_account_name TEXT")
+        add_column_if_missing(conn, "api_source_config", "azure_container_name", "azure_container_name TEXT")
+        add_column_if_missing(conn, "api_source_config", "azure_account_key", "azure_account_key TEXT")
+
+        try:
+            conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN expected_data_type DROP NOT NULL"))
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN dq_rule DROP NOT NULL"))
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE dq_schema_config ALTER COLUMN severity DROP NOT NULL"))
+        except Exception:
+            pass
+        for col in ("platform", "workspace_id", "pipeline_id", "deployment_strategy"):
+            try:
+                add_column_if_missing(conn, "pipeline_run_history", col, f"{col} TEXT")
+            except Exception:
+                pass
+
         # Explicitly commit the migration transaction
         conn.commit()
 
         # Drop any existing foreign key constraints on dq_schema_config.dataset_id
-        fk_rows = conn.execute(text(
-            """
-            SELECT tc.constraint_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema = kcu.table_schema
-            WHERE tc.table_name = 'dq_schema_config'
-              AND tc.constraint_type = 'FOREIGN KEY'
-              AND kcu.column_name = 'dataset_id'
-            """
-        )).fetchall()
+        fk_rows = []
+        try:
+            fk_rows = conn.execute(text(
+                """
+                SELECT tc.constraint_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_name = 'dq_schema_config'
+                  AND tc.constraint_type = 'FOREIGN KEY'
+                  AND kcu.column_name = 'dataset_id'
+                """
+            )).fetchall()
+        except Exception:
+            fk_rows = []
         for (cname,) in fk_rows:
             try:
                 conn.execute(text(f"ALTER TABLE dq_schema_config DROP CONSTRAINT IF EXISTS {cname}"))
@@ -195,6 +239,18 @@ try:
 except Exception:
     pass
 # ─── Legacy Deployment Route (Ported from Discovery Agent) ──────────────────
+
+try:
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for col in ("platform", "workspace_id", "pipeline_id", "deployment_strategy"):
+            try:
+                conn.execute(text(f"ALTER TABLE pipeline_run_history ADD COLUMN {col} TEXT"))
+            except Exception:
+                pass
+        conn.commit()
+except Exception:
+    pass
 
 @app.post("/deploy/execute", tags=["Fabric Deployment"])
 async def deploy_pipeline_execute(
@@ -213,6 +269,18 @@ async def deploy_pipeline_execute(
     resolved_token = resolve_fabric_token(access_token)
     if not resolved_token:
         raise HTTPException(status_code=401, detail="No Fabric Access Token found. Please re-analyze or scan.")
+
+    from services.fabric.entity_resolver import resolve_workspace_id, log_export_context
+    target_workspace_id, resolved_workspace_name = await resolve_workspace_id(
+        resolved_token, workspace_id=target_workspace_id
+    )
+    log_export_context(
+        workspace_id=target_workspace_id,
+        pipeline_item_id="(create_new_zip_deploy)",
+        workspace_name=resolved_workspace_name,
+        pipeline_name=pipeline_name or "",
+        operation="deploy_execute",
+    )
 
     headers = {"Authorization": f"Bearer {resolved_token}", "Content-Type": "application/json"}
     FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"

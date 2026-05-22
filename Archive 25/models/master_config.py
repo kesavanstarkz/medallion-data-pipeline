@@ -47,6 +47,8 @@ class MasterConfig(Base):
     
     # 8. Validation & Metadata
     validation_rules = Column(JSON, nullable=True)
+    # Persist discovered schema for DQ & downstream consumers
+    schema = Column(JSON, nullable=True)
     sensitive_data_flag = Column(Boolean, default=False)
     dependency_id = Column(String(36), nullable=True)
     

@@ -709,25 +709,72 @@ class FabricConnector(MCPSourceConnector):
         return []
 
     def get_file_content(self, file_path_canonical: str, client_name: str) -> bytes:
+        """
+        Fabric connector reads either a staging table in Neon/Postgres or a file artifact
+        exported to the raw layer. We determine which by probing the database for a table
+        name first; if not found, we attempt to read via available cloud/local connectors.
+        """
         import psycopg2
         import pandas as pd
         from io import BytesIO
         from core.settings import settings
-        
-        # In Fabric mode, file_path_canonical is expected to be the staging table name
-        staging_table = file_path_canonical.split("/")[-1]
-        logger.info(f"FabricConnector: Reading from Neon table {staging_table}")
-        
+        # Refer to connector classes defined below in this module (avoid circular import)
+        LocalConnector = globals().get('LocalConnector')
+        ADLSConnector = globals().get('ADLSConnector')
+        S3Connector = globals().get('S3Connector')
+        APIConnector = globals().get('APIConnector')
+
+        # Normalize incoming identifier
+        key = (file_path_canonical or "").split("/")[-1]
+        staging_table = key
+        logger.info(f"FabricConnector: resolving {file_path_canonical} (probe as table: {staging_table})")
+
+        # 1) Probe Neon/Postgres for a real table name using to_regclass
         try:
             conn = psycopg2.connect(settings.NEON_DB_URL)
-            df = pd.read_sql(f"SELECT * FROM {staging_table} LIMIT 100", conn)
+            cur = conn.cursor()
+            cur.execute("SELECT to_regclass(%s)", (staging_table,))
+            found = cur.fetchone()[0]
+            if found:
+                logger.info(f"FabricConnector: Detected existing table {staging_table} in Neon, reading via SQL")
+                df = pd.read_sql(f"SELECT * FROM {staging_table} LIMIT 100", conn)
+                conn.close()
+                with BytesIO() as buffer:
+                    df.to_csv(buffer, index=False)
+                    return buffer.getvalue()
             conn.close()
-            
-            with BytesIO() as buffer:
-                df.to_csv(buffer, index=False)
-                return buffer.getvalue()
         except Exception as e:
-            logger.error(f"FabricConnector failed to read {staging_table}: {e}")
+            # If the DB probe fails, log and continue to try file-based reads
+            logger.debug(f"FabricConnector DB probe failed for {staging_table}: {e}")
+
+        # 2) Attempt to treat as file artifact. Try connector choices based on common prefixes.
+        try:
+            # Heuristics: s3://, az://, Raw/ or blob-like names
+            cp = (file_path_canonical or "")
+            connectors_to_try = []
+            if cp.startswith("s3://"):
+                connectors_to_try = [S3Connector()]
+            elif cp.startswith("az://") or cp.startswith("azdls://"):
+                connectors_to_try = [ADLSConnector()]
+            else:
+                # Local (Raw layer) first, then ADLS/S3 fallbacks
+                connectors_to_try = [LocalConnector(), ADLSConnector(), S3Connector(), APIConnector()]
+
+            last_err = None
+            for c in connectors_to_try:
+                try:
+                    logger.info(f"FabricConnector: trying connector {c.__class__.__name__} for {file_path_canonical}")
+                    content = c.get_file_content(file_path_canonical, client_name)
+                    if content:
+                        return content
+                except Exception as ce:
+                    last_err = ce
+                    logger.debug(f"Connector {c.__class__.__name__} failed for {file_path_canonical}: {ce}")
+                    continue
+
+            raise RuntimeError(f"No connector could read file {file_path_canonical}: {last_err}")
+        except Exception as e:
+            logger.error(f"FabricConnector failed to read artifact {file_path_canonical}: {e}")
             raise RuntimeError(f"FabricConnector failed: {e}")
 
 

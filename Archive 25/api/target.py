@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from core.database import get_db
 from models.target import Client, Target
@@ -27,7 +27,8 @@ class SaveDataToTargetRequest(BaseModel):
     target_id: str
     preview_data: Optional[Dict[str, Any]] = None
     save_schema: Optional[List[Dict[str, Any]]] = None
-    schema: Optional[List[Dict[str, Any]]] = None # Direct schema
+    data_schema: Optional[List[Dict[str, Any]]] = Field(default=None, alias="schema") # Direct schema
+    schema_discovery: Optional[Dict[str, Any]] = None
     rows: Optional[List[Any]] = None # Direct rows
     save_mode: str
     table_name: str
@@ -156,8 +157,8 @@ async def save_data_to_target(request: SaveDataToTargetRequest, db: Session = De
     columns = []
     
     # Priority 1: Explicitly passed schema
-    if request.schema:
-        columns = [c.get("name") or c.get("column_name") for c in request.schema if c.get("name") or c.get("column_name")]
+    if request.data_schema:
+        columns = [c.get("name") or c.get("column_name") for c in request.data_schema if c.get("name") or c.get("column_name")]
     
     # Priority 2: Fallback to old preview_data/schema_discovery if rows/columns empty
     if not rows and request.preview_data:

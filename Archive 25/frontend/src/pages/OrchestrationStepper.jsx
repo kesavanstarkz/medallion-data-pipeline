@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useApi, apiUrl } from "../hooks/useApi";
 import { useToast } from "../hooks/useToast";
@@ -23,16 +23,17 @@ import { useLocation, useNavigate } from "react-router-dom";
 import FluentSelect from "../components/FluentSelect";
 import StepPlatform from "../components/orchestration/StepPlatform";
 import StepClient from "../components/orchestration/StepClient";
-import StepSource from "../components/orchestration/StepSource";
 import StepSourceConfig from "../components/orchestration/StepSourceConfig";
-import StepSources from "../components/orchestration/StepSources";
-import StepConfig from "../components/orchestration/StepConfig";
-import StepDQ from "../components/orchestration/StepDQ";
 import StepProgress from "../components/orchestration/StepProgress";
 import StepReviewConfirm from "../components/orchestration/StepReviewConfirm";
 import StepDeployment from "../components/orchestration/StepDeployment";
 import PipelineIntelligence from "../components/PipelineIntelligence";
 import HistoryView from "./HistoryView";
+import {
+    normalizeFabricWorkspace,
+    normalizeFabricPipeline,
+    isFabricGuid,
+} from "../utils/fabricContext";
 import "./orchestration.css";
 
 const STEPS_CONFIG = [
@@ -44,16 +45,16 @@ const STEPS_CONFIG = [
         label: "Intelligence",
         path: "/intelligence",
     },
-    { id: "source", num: 3, label: "Source", path: "/source" },
     {
         id: "source-config",
-        num: 4,
+        num: 3,
         label: "Source Config",
         path: "/source-config",
     },
-    { id: "deployment", num: 5, label: "Deployment", path: "/deployment" },
-    { id: "review", num: 6, label: "Review", path: "/review" },
-    { id: "execution", num: 7, label: "Execution", path: "/execution" },
+    { id: "deployment", num: 4, label: "Deployment", path: "/deployment" },
+    { id: "review", num: 5, label: "Review", path: "/review" },
+    { id: "execution", num: 6, label: "Execution", path: "/execution" },
+    { id: "history", num: 7, label: "History / Monitoring", path: "/history" },
 ];
 
 function parseStrictJson(text) {
@@ -145,14 +146,28 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     const [deploymentPackage, setDeploymentPackage] = useState(null);
     const [selectedWorkspace, setSelectedWorkspace] = useState(() => {
         try {
-            return JSON.parse(sessionStorage.getItem("wizard_fabric_workspace") || "null");
+            const raw = JSON.parse(
+                sessionStorage.getItem("wizard_fabric_workspace") || "null",
+            );
+            return normalizeFabricWorkspace(raw);
         } catch {
             return null;
         }
     });
     const [selectedPipeline, setSelectedPipeline] = useState(() => {
         try {
-            return JSON.parse(sessionStorage.getItem("wizard_fabric_pipeline") || "null");
+            const raw = JSON.parse(
+                sessionStorage.getItem("wizard_fabric_pipeline") || "null",
+            );
+            const ws = normalizeFabricWorkspace(
+                JSON.parse(
+                    sessionStorage.getItem("wizard_fabric_workspace") || "null",
+                ),
+            );
+            return normalizeFabricPipeline(
+                raw,
+                ws?.workspace_id || ws?.id,
+            );
         } catch {
             return null;
         }
@@ -160,7 +175,13 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     const [fabricAccessToken, setFabricAccessToken] = useState(null);
     const [masterConfig, setMasterConfig] = useState(null);
     const [targets, setTargets] = useState([]);
-    const [selectedTarget, setSelectedTarget] = useState(null);
+    const [selectedTarget, setSelectedTarget] = useState(() => {
+        try {
+            return JSON.parse(sessionStorage.getItem("wizard_selected_target") || "null");
+        } catch {
+            return null;
+        }
+    });
     const selectedWorkspaceRef = useRef(null);
 
     // Source form state
@@ -289,15 +310,21 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     }, []);
 
     const handleWorkspaceSelection = (workspace) => {
-        const previousWorkspaceId = selectedWorkspaceRef.current?.id || null;
-        const nextWorkspaceId = workspace?.id || null;
+        const normalized = normalizeFabricWorkspace(workspace);
+        const previousWorkspaceId =
+            selectedWorkspaceRef.current?.workspace_id ||
+            selectedWorkspaceRef.current?.id ||
+            null;
+        const nextWorkspaceId =
+            normalized?.workspace_id || normalized?.id || null;
         console.log("STEPPER: Workspace selection change", {
             previousWorkspaceId,
             nextWorkspaceId,
+            workspace_name: normalized?.workspace_name,
         });
 
-        selectedWorkspaceRef.current = workspace || null;
-        setSelectedWorkspace(workspace || null);
+        selectedWorkspaceRef.current = normalized || null;
+        setSelectedWorkspace(normalized || null);
 
         if (previousWorkspaceId !== nextWorkspaceId) {
             setSelectedPipeline(null);
@@ -306,14 +333,26 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     };
 
     function handlePipelineSelection(pipeline) {
-        const previousPipelineId = selectedPipeline?.id || null;
-        const nextPipelineId = pipeline?.id || null;
+        const normalized = normalizeFabricPipeline(
+            pipeline,
+            selectedWorkspaceRef.current?.workspace_id ||
+                selectedWorkspaceRef.current?.id,
+        );
+        const previousPipelineId =
+            selectedPipeline?.pipeline_item_id || selectedPipeline?.id || null;
+        const nextPipelineId =
+            normalized?.pipeline_item_id || normalized?.id || null;
         console.log("STEPPER: Pipeline selection change", {
-            workspaceId: selectedWorkspaceRef.current?.id || null,
+            workspaceId:
+                selectedWorkspaceRef.current?.workspace_id ||
+                selectedWorkspaceRef.current?.id ||
+                null,
             previousPipelineId,
             nextPipelineId,
+            pipeline_name: normalized?.pipeline_name,
+            id_is_guid: isFabricGuid(nextPipelineId),
         });
-        setSelectedPipeline(pipeline || null);
+        setSelectedPipeline(normalized || null);
     }
 
     const fetchClientSourceTypes = useCallback(
@@ -637,7 +676,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
 
         console.debug("Execution trigger validation passed", normalizedPayload);
 
-        goToStep(7);
+        goToStep(6);
         setOrchestrateResp({ progress: [] });
         setIsOrchestrating(true);
         try {
@@ -1465,6 +1504,14 @@ export default function OrchestrationStepper({ hideHeader = false }) {
     }, [deploymentStrategy]);
 
     useEffect(() => {
+        if (selectedTarget) {
+            sessionStorage.setItem("wizard_selected_target", JSON.stringify(selectedTarget));
+        } else {
+            sessionStorage.removeItem("wizard_selected_target");
+        }
+    }, [selectedTarget]);
+
+    useEffect(() => {
         if (selectedWorkspace) {
             sessionStorage.setItem("wizard_fabric_workspace", JSON.stringify(selectedWorkspace));
         }
@@ -1515,13 +1562,6 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                             }}
                         >
                             {STEPS_CONFIG.map((s, idx) => {
-                                // Skip 'Deployment' step label if not Fabric
-                                if (
-                                    s.num === 5 &&
-                                    selectedPlatform !== "FABRIC"
-                                )
-                                    return null;
-
                                 return (
                                     <div
                                         key={s.num}
@@ -1622,7 +1662,16 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                             p,
                                         );
                                     }}
-                                    onNext={() => goToStep(1)}
+                                    onNext={() => {
+                                        if (selectedPlatform !== "FABRIC") {
+                                            toast(
+                                                "Only Microsoft Fabric is configured. Select Microsoft Fabric to continue.",
+                                                "warning",
+                                            );
+                                            return;
+                                        }
+                                        goToStep(1);
+                                    }}
                                 />
                             )}
                             {step === 1 && (
@@ -1721,6 +1770,21 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                                     data.__fabric_access_token,
                                                 );
 
+                                            if (selectedPlatform === "FABRIC") {
+                                                setSourceType("FABRIC");
+                                                const fabricSource =
+                                                    data.source_path ||
+                                                    data.folder_path ||
+                                                    selectedPipeline?.id ||
+                                                    selectedPipeline?.name ||
+                                                    "fabric_pipeline";
+                                                setFolderPath(fabricSource);
+                                                setSelectedEndpoint(fabricSource);
+                                                setSelectedApiSource(
+                                                    "fabric-intelligence",
+                                                );
+                                            }
+
                                             // Preload source into orchestration if it's a Fabric runtime promotion
                                             if (
                                                 data.staging_table ||
@@ -1750,28 +1814,12 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                                 );
                                             }
                                         }
-                                        // Configure EVERYTHING before deployment
+                                        fetchDatasets();
                                         goToStep(3);
                                     }}
                                 />
                             )}
                             {step === 3 && (
-                                <StepSource
-                                    sourceType={sourceType}
-                                    setSourceType={setSourceType}
-                                    sourceForm={sourceForm}
-                                    setSourceForm={setSourceForm}
-                                    selectedWorkspace={selectedWorkspace}
-                                    selectedPipeline={selectedPipeline}
-                                    setShowUploadModal={setShowUploadModal}
-                                    onNext={() => {
-                                        fetchDatasets();
-                                        goToStep(4);
-                                    }}
-                                    onBack={() => goToStep(2)}
-                                />
-                            )}
-                            {step === 4 && (
                                 <StepSourceConfig
                                     sourceType={sourceType}
                                     folderPath={folderPath}
@@ -1815,8 +1863,8 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                     saveDqConfig={saveDqConfig}
                                     editingConfigSaving={editingConfigSaving}
                                     formatDatasetLabel={formatDatasetLabel}
-                                    onNext={() => goToStep(5)}
-                                    onBack={() => goToStep(3)}
+                                    onNext={() => goToStep(4)}
+                                    onBack={() => goToStep(2)}
                                     runOrchestration={runOrchestration}
                                     isOrchestrating={isOrchestrating}
                                     datasetsLoading={datasetsLoading}
@@ -1840,7 +1888,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                     pipelineDeployed={pipelineDeployed}
                                 />
                             )}
-                            {step === 5 && (
+                            {step === 4 && (
                                 <StepDeployment
                                     selectedWorkspace={selectedWorkspace}
                                     selectedPipeline={selectedPipeline}
@@ -1848,11 +1896,15 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                     deploymentPackage={deploymentPackage}
                                     setDeploymentPackage={setDeploymentPackage}
                                     fabricAccessToken={fabricAccessToken}
-                                    onNext={() => goToStep(6)}
-                                    onBack={() => goToStep(4)}
+                                    intelligenceData={intelligenceData}
+                                    onNext={() => {
+                                        setPipelineDeployed(true);
+                                        goToStep(5);
+                                    }}
+                                    onBack={() => goToStep(3)}
                                 />
                             )}
-                            {step === 6 && (
+                            {step === 5 && (
                                 <StepReviewConfirm
                                     selectedClient={selectedClient}
                                     sourceType={sourceType}
@@ -1864,7 +1916,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                         selectedApiSource ===
                                         "intelligence-scan"
                                     }
-                                    onBack={() => goToStep(5)}
+                                    onBack={() => goToStep(4)}
                                     onConfirm={runOrchestration}
                                     isOrchestrating={isOrchestrating}
                                     fabricMode={sourceForm.fabricMode}
@@ -1874,9 +1926,10 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                     deploymentPackage={deploymentPackage}
                                     selectedWorkspace={selectedWorkspace}
                                     selectedPipeline={selectedPipeline}
+                                    selectedTarget={selectedTarget}
                                 />
                             )}
-                            {step === 7 && (
+                            {step === 6 && (
                                 <StepProgress
                                     orchestrateResp={orchestrateResp}
                                     isOrchestrating={isOrchestrating}
@@ -1890,6 +1943,7 @@ export default function OrchestrationStepper({ hideHeader = false }) {
                                     intelligenceData={intelligenceData}
                                 />
                             )}
+                            {step === 7 && <HistoryView isEmbedded />}
                         </AnimatePresence>
                     </div>
                 </>

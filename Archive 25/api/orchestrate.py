@@ -139,6 +139,7 @@ def run(
     discovery_mode: Optional[str] = None,
     workspace_id: Optional[str] = None,
     pipeline_id:  Optional[str] = None,
+    deployment_strategy: Optional[str] = None,
     staging_table: Optional[str] = None,
     db:           Session        = Depends(get_db),
 ):
@@ -230,6 +231,10 @@ def run(
             client_name=client_name,
             source_type=src,
             folder_path=folder_path,
+            platform=platform,
+            workspace_id=workspace_id,
+            pipeline_id=pipeline_id,
+            deployment_strategy=deployment_strategy,
             status="RUNNING"
         )
         db.add(run_record)
@@ -856,7 +861,31 @@ def get_run_history(limit: int = 50, db: Session = Depends(get_db)):
     """Fetches the most recent pipeline execution runs from the history table."""
     try:
         runs = db.query(PipelineRunHistory).order_by(PipelineRunHistory.start_time.desc()).limit(limit).all()
-        return {"status": "SUCCESS", "runs": runs}
+        return {
+            "status": "SUCCESS",
+            "runs": [
+                {
+                    "run_id": r.run_id,
+                    "batch_id": r.batch_id,
+                    "client_name": r.client_name,
+                    "source_type": r.source_type,
+                    "folder_path": r.folder_path,
+                    "platform": r.platform,
+                    "workspace_id": r.workspace_id,
+                    "pipeline_id": r.pipeline_id,
+                    "deployment_strategy": r.deployment_strategy,
+                    "status": r.status,
+                    "start_time": r.start_time,
+                    "end_time": r.end_time,
+                    "total_datasets": r.total_datasets,
+                    "success_count": r.success_count,
+                    "failure_count": r.failure_count,
+                    "pipeline_results": r.pipeline_results,
+                    "error_message": r.error_message,
+                }
+                for r in runs
+            ],
+        }
     except Exception as e:
         logger.error(f"Failed to fetch run history: {e}")
         raise HTTPException(status_code=500, detail=str(e))

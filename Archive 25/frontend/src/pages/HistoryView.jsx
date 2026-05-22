@@ -62,8 +62,8 @@ export default function HistoryView({ isEmbedded = false }) {
     <div className="history-beta-container">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 900, color: 'var(--text1)' }}>📜 Execution History</h2>
-          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text3)' }}>Review and audit previous pipeline orchestration runs.</p>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 900, color: 'var(--text1)' }}>History / Monitoring</h2>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text3)' }}>Review Fabric deployments, orchestration runs, strategy usage, and execution outcomes.</p>
         </div>
         <button className="orch-btn ghost tiny" onClick={loadHistory} disabled={loading}>
           <FiRefreshCw className={loading ? 'spin' : ''} style={{ marginRight: 6 }} /> 
@@ -79,6 +79,8 @@ export default function HistoryView({ isEmbedded = false }) {
                 <th>Batch ID</th>
                 <th>Client</th>
                 <th>Source</th>
+                <th>Strategy</th>
+                <th>Workspace</th>
                 <th>Status</th>
                 <th>Start Time</th>
                 <th>Duration</th>
@@ -90,12 +92,12 @@ export default function HistoryView({ isEmbedded = false }) {
               {loading ? (
                 Array.from({ length: 5 }).map((_, i) => (
                   <tr key={i}>
-                    <td colSpan={8}><div className="skeleton" style={{ height: 40, margin: '8px 0' }} /></td>
+                    <td colSpan={10}><div className="skeleton" style={{ height: 40, margin: '8px 0' }} /></td>
                   </tr>
                 ))
               ) : runs.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: 'var(--text3)' }}>
+                  <td colSpan={10} style={{ textAlign: 'center', padding: 40, color: 'var(--text3)' }}>
                     No execution history found.
                   </td>
                 </tr>
@@ -108,6 +110,8 @@ export default function HistoryView({ isEmbedded = false }) {
                       {r.source_type}
                     </span>
                   </td>
+                  <td style={{ fontSize: 12 }}>{r.deployment_strategy ? r.deployment_strategy.replace(/_/g, ' ') : 'Not captured'}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.workspace_id || 'Not captured'}</td>
                   <td>{getStatusBadge(r.status)}</td>
                   <td style={{ fontSize: 12, color: 'var(--text3)' }}>{new Date(r.start_time).toLocaleString()}</td>
                   <td>{formatDuration(r.start_time, r.end_time)}</td>
@@ -154,7 +158,7 @@ export default function HistoryView({ isEmbedded = false }) {
                     background: selectedRun.status === 'SUCCESS' ? '#f0fdf4' : '#fef2f2',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24
                   }}>
-                    {selectedRun.status === 'SUCCESS' ? '✅' : '❌'}
+                    {selectedRun.status === 'SUCCESS' ? <FiCheckCircle color="#16a34a" /> : <FiAlertCircle color="#ef4444" />}
                   </div>
                   <div>
                     <h3 style={{ margin: 0 }}>Run {selectedRun.batch_id}</h3>
@@ -184,6 +188,13 @@ export default function HistoryView({ isEmbedded = false }) {
                       <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--text3)', textTransform: 'uppercase', marginBottom: 8 }}>Duration</div>
                       <div style={{ fontSize: 24, fontWeight: 900 }}>{formatDuration(selectedRun.start_time, selectedRun.end_time)}</div>
                    </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 28 }}>
+                  <div className="config-chip"><strong>Strategy:</strong> {selectedRun.deployment_strategy ? selectedRun.deployment_strategy.replace(/_/g, ' ') : 'Not captured'}</div>
+                  <div className="config-chip"><strong>Workspace:</strong> {selectedRun.workspace_id || 'Not captured'}</div>
+                  <div className="config-chip"><strong>Pipeline:</strong> {selectedRun.pipeline_id || 'Not captured'}</div>
+                  <div className="config-chip"><strong>Platform:</strong> {selectedRun.platform || 'Not captured'}</div>
                 </div>
 
                 <h4 style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>

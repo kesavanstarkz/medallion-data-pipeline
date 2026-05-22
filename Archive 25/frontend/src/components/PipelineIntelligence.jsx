@@ -29,6 +29,10 @@ import {
 import CloudPortalScanModal from "./orchestration/CloudPortalScanModal";
 import PipelineFlowCanvas from "./orchestration/PipelineFlowCanvas";
 import { useApi, apiUrl } from "../hooks/useApi";
+import {
+    normalizeFabricWorkspace,
+    normalizeFabricPipeline,
+} from "../utils/fabricContext";
 import DynamicPreviewTable from "./DynamicPreviewTable";
 import "reactflow/dist/style.css";
 import "./PipelineIntelligence.css";
@@ -468,24 +472,9 @@ export default function PipelineIntelligence({
     const runtimeCaptureRequestRef = useRef(0);
     const runtimePreviewRequestRef = useRef(0);
 
-    const configuredSourceTypes = useMemo(() => {
-        const values = (clientSourceTypes || [])
-            .map((item) => String(item || "").toUpperCase())
-            .filter(Boolean);
-        const current = String(currentSourceType || "").toUpperCase();
-        const mapped = current === "API" ? "REST_API" : current;
-        if (mapped) values.push(mapped);
-        if (selectedPlatform === "FABRIC" && !values.includes("FABRIC"))
-            values.push("FABRIC");
-        return [...new Set(values)];
-    }, [clientSourceTypes, currentSourceType, selectedPlatform]);
-
     const allowedTargets = useMemo(
-        () =>
-            TARGETS.filter((item) =>
-                configuredSourceTypes.includes(item.sourceType),
-            ),
-        [configuredSourceTypes],
+        () => TARGETS.filter((item) => item.sourceType === "FABRIC"),
+        [],
     );
     const selectedTarget = allowedTargets.find((item) => item.id === target);
     const apiDetailsAvailable = hasApiScanDetails(apiSources);
@@ -645,8 +634,20 @@ export default function PipelineIntelligence({
         if (scanInProgress || analyzing) return;
         setAnalyzing(true);
         setError(null);
-        setSelectedWorkspace(workspace);
-        setSelectedPipeline(pipeline);
+        const normalizedWorkspace = normalizeFabricWorkspace(workspace);
+        const normalizedPipeline = normalizeFabricPipeline(
+            pipeline,
+            normalizedWorkspace?.workspace_id || normalizedWorkspace?.id,
+        );
+        setSelectedWorkspace(normalizedWorkspace);
+        setSelectedPipeline(normalizedPipeline);
+
+        const workspaceId =
+            normalizedWorkspace?.workspace_id || normalizedWorkspace?.id;
+        const pipelineItemId =
+            normalizedPipeline?.pipeline_item_id || normalizedPipeline?.id;
+        const workspaceName = normalizedWorkspace?.workspace_name || "";
+        const pipelineName = normalizedPipeline?.pipeline_name || "";
 
         try {
             const headers = { "Content-Type": "application/json" };
@@ -660,8 +661,11 @@ export default function PipelineIntelligence({
                     platform: "FABRIC",
                     source_type: "FABRIC",
                     payload: {
-                        workspace_id: workspace.id,
-                        pipeline_id: pipeline.id,
+                        workspace_id: workspaceId,
+                        workspace_name: workspaceName,
+                        pipeline_id: pipelineItemId,
+                        pipeline_item_id: pipelineItemId,
+                        pipeline_name: pipelineName,
                     },
                     use_cloud_llm: useCloudLlm,
                 }),
@@ -1396,10 +1400,10 @@ export default function PipelineIntelligence({
     return (
         <div className="pipeline-intelligence-container">
             <div className="pi-header">
-                <h2>Pipeline Intelligence</h2>
+                <h2>Microsoft Fabric Intelligence</h2>
                 <p className="step-sub">
-                    Discover pipeline architecture, ingestion support,
-                    configuration, and DQ signals.
+                    Authenticate to Azure, scan Fabric workspaces, inspect
+                    data pipelines, and choose a reuse strategy.
                 </p>
             </div>
 
@@ -1451,7 +1455,7 @@ export default function PipelineIntelligence({
                             !selectedRequiresScan
                         }
                     >
-                        <FiSearch /> Scan Framework
+                        <FiSearch /> Run Framework Scan
                     </button>
                 )}
 
