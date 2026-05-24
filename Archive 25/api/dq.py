@@ -4,6 +4,7 @@ from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
 from core.database import get_db
 from models.master_config_authoritative import MasterConfigAuthoritative
+from models.master_config import MasterConfig
 from models.dq_schema_config import DQSchemaConfig, ExpectedDataType, DQRule, Severity
 from core.settings import settings
 from core.azure_storage import get_storage_client
@@ -63,12 +64,167 @@ def configure_dq(request: DQConfigureRequest, db: Session = Depends(get_db)):
     db.commit()
     return get_dq_config(request.dataset_id, db)
 
+def _resolve_master_config_row(
+    dataset_id: str,
+    db: Session,
+    client_name: Optional[str] = None,
+) -> tuple[Optional[MasterConfigAuthoritative], Optional[MasterConfig]]:
+    """Resolve authoritative/legacy rows by dataset_id or common display-name aliases."""
+    from api.discovery import _is_temporary_artifact_name
+
+    authoritative = (
+        db.query(MasterConfigAuthoritative)
+        .filter(MasterConfigAuthoritative.dataset_id == dataset_id)
+        .first()
+    )
+    legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == dataset_id).first()
+
+    def check_and_pivot(auth_row, leg_row):
+        if not auth_row and not leg_row:
+            return auth_row, leg_row
+        
+        src_type = (auth_row.source_type if auth_row else None) or (leg_row.source_type if leg_row else None)
+        src_obj = (auth_row.source_object if auth_row else None) or (leg_row.source_object if leg_row else None)
+        cli_name = (auth_row.client_name if auth_row else None) or (leg_row.client_name if leg_row else None) or client_name
+
+        if (src_type == "FABRIC" or (src_obj and _is_temporary_artifact_name(src_obj))) and cli_name:
+            # Query for another active non-FABRIC row for this client
+            pivot_row = (
+                db.query(MasterConfigAuthoritative)
+                .filter(
+                    MasterConfigAuthoritative.client_name == cli_name,
+                    MasterConfigAuthoritative.source_type != "FABRIC",
+                    MasterConfigAuthoritative.is_active == True,
+                )
+                .first()
+            )
+            if pivot_row:
+                logger.info(f"DQ Resolver Dynamic Pivot: from Fabric/temporary row (dataset_id={dataset_id}) to non-FABRIC active row (dataset_id={pivot_row.dataset_id}) for client={cli_name}")
+                pivot_legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == pivot_row.dataset_id).first()
+                return pivot_row, pivot_legacy
+        return auth_row, leg_row
+
+    if authoritative or legacy:
+        return check_and_pivot(authoritative, legacy)
+
+    if not client_name and " " in str(dataset_id):
+        # Display names like "Fabric Pipeline" won't match hashed ids; require client scope.
+        return None, None
+
+    filters = []
+    if client_name:
+        filters.append(MasterConfigAuthoritative.client_name == client_name)
+    authoritative_candidates = db.query(MasterConfigAuthoritative).filter(*filters).all() if filters else []
+    for row in authoritative_candidates:
+        if (
+            row.source_object == dataset_id
+            or row.pipeline_id == dataset_id
+            or (row.raw_layer_path and dataset_id in str(row.raw_layer_path))
+        ):
+            legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == row.dataset_id).first()
+            return check_and_pivot(row, legacy)
+
+    if client_name:
+        legacy_candidates = (
+            db.query(MasterConfig).filter(MasterConfig.client_name == client_name).all()
+        )
+        for row in legacy_candidates:
+            if row.source_object == dataset_id or row.pipeline_id == dataset_id:
+                authoritative = (
+                    db.query(MasterConfigAuthoritative)
+                    .filter(MasterConfigAuthoritative.dataset_id == row.dataset_id)
+                    .first()
+                )
+                return check_and_pivot(authoritative, row)
+
+    return None, None
+
+
+def _columns_from_stored_schema(schema_payload) -> List[Dict]:
+    if not schema_payload:
+        return []
+    if isinstance(schema_payload, list):
+        raw_columns = schema_payload
+    elif isinstance(schema_payload, dict):
+        raw_columns = schema_payload.get("columns") or []
+    else:
+        return []
+
+    cols = []
+    for col in raw_columns:
+        if isinstance(col, str):
+            cols.append(
+                {
+                    "column_name": col,
+                    "expected_data_type": "STRING",
+                    "dq_rules": [],
+                    "rule_value": None,
+                    "severity": "ERROR",
+                    "is_active": False,
+                }
+            )
+            continue
+        if not isinstance(col, dict):
+            continue
+        name = col.get("column_name") or col.get("name") or col.get("displayName")
+        if not name:
+            continue
+        inferred = str(col.get("data_type") or col.get("inferred_type") or "STRING").upper()
+        expected = "STRING"
+        if "INT" in inferred:
+            expected = "INTEGER"
+        elif "FLOAT" in inferred or "DOUBLE" in inferred or "DECIMAL" in inferred:
+            expected = "FLOAT"
+        elif "DATE" in inferred or "TIME" in inferred:
+            expected = "TIMESTAMP"
+        cols.append(
+            {
+                "column_name": name,
+                "expected_data_type": expected,
+                "dq_rules": [],
+                "rule_value": None,
+                "severity": "ERROR",
+                "is_active": False,
+            }
+        )
+    return cols
+
+
 @router.get("/config/{dataset_id}")
-def get_dq_config(dataset_id: str, db: Session = Depends(get_db)):
-    rows = db.query(DQSchemaConfig).filter(DQSchemaConfig.dataset_id == dataset_id).all()
+def get_dq_config(
+    dataset_id: str,
+    client_name: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    mc, legacy = _resolve_master_config_row(dataset_id, db, client_name=client_name)
+    resolved_dataset_id = mc.dataset_id if mc else (legacy.dataset_id if legacy else dataset_id)
+
+    rows = db.query(DQSchemaConfig).filter(DQSchemaConfig.dataset_id == resolved_dataset_id).all()
     if not rows:
+        if mc and getattr(mc, "schema", None):
+            stored_cols = _columns_from_stored_schema(mc.schema)
+            if stored_cols:
+                return {"dataset_id": resolved_dataset_id, "columns": stored_cols}
+
+        if not legacy:
+            legacy = db.query(MasterConfig).filter(MasterConfig.dataset_id == resolved_dataset_id).first()
+        if legacy:
+            if getattr(legacy, "schema", None):
+                stored_cols = _columns_from_stored_schema(legacy.schema)
+                if stored_cols:
+                    return {"dataset_id": resolved_dataset_id, "columns": stored_cols}
+            validation_rules = legacy.validation_rules or {}
+            if isinstance(validation_rules, dict):
+                stored_cols = _columns_from_stored_schema(validation_rules.get("schema"))
+                if stored_cols:
+                    return {"dataset_id": resolved_dataset_id, "columns": stored_cols}
+
         try:
-            discovery = get_dataset_columns(dataset_id, db=db)
+            discovery = get_dataset_columns(
+                resolved_dataset_id,
+                client_name=client_name or (mc.client_name if mc else None),
+                db=db,
+            )
             cols = []
             for c in discovery.get("columns", []):
                 inferred = c.get("inferred_type", "STRING").lower()
@@ -85,10 +241,10 @@ def get_dq_config(dataset_id: str, db: Session = Depends(get_db)):
                     "severity": "ERROR",
                     "is_active": False
                 })
-            return {"dataset_id": dataset_id, "columns": cols}
+            return {"dataset_id": resolved_dataset_id, "columns": cols}
         except Exception as e:
-            logger.warning(f"Auto-discovery fallback failed for {dataset_id}: {e}")
-            return {"dataset_id": dataset_id, "columns": []}
+            logger.warning(f"Auto-discovery fallback failed for {resolved_dataset_id}: {e}")
+            return {"dataset_id": resolved_dataset_id, "columns": []}
     by_col: Dict[str, Dict] = {}
     for r in rows:
         name = r.column_name or "__dataset__"
@@ -115,7 +271,7 @@ def get_dq_config(dataset_id: str, db: Session = Depends(get_db)):
             # Capture rule_value from active rows (may differ per rule)
             if r.rule_value is not None:
                 entry["rule_value"] = r.rule_value
-    return {"dataset_id": dataset_id, "columns": list(by_col.values())}
+    return {"dataset_id": resolved_dataset_id, "columns": list(by_col.values())}
 
 class DQSuggestRequest(BaseModel):
     dataset_id: str
@@ -644,7 +800,8 @@ def sync_master_config(request: SyncRequest, db: Session = Depends(get_db)):
 
 @router.get("/columns/{dataset_id}")
 def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: Session = Depends(get_db)):
-    mc = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+    mc, legacy_row = _resolve_master_config_row(dataset_id, db, client_name=client_name)
+    resolved_dataset_id = mc.dataset_id if mc else (legacy_row.dataset_id if legacy_row else dataset_id)
     if not mc and not client_name:
         raise HTTPException(status_code=404, detail="dataset_id not found; run /dq/sync_master_config or provide client_name")
 
@@ -680,7 +837,7 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
             for col in mc.schema.get("columns", []) if isinstance(mc.schema, dict) else (mc.schema or []):
                 # Normalize to expected output for DQ
                 cols.append({"name": col.get("column_name") or col.get("name"), "inferred_type": col.get("data_type") or col.get("inferred_type")})
-            return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
+            return {"dataset_id": resolved_dataset_id, "client_name": resolved_client, "columns": cols}
         except Exception:
             logger.warning("Failed returning stored schema from MasterConfigAuthoritative; falling back to live inference")
 
@@ -692,18 +849,29 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
     from api.orchestrate import _canonical_source_type
     can_src = _canonical_source_type(source_type)
 
-    if can_src == "FABRIC":
-        # For Fabric, canonical is the staging table name
-        canonical = getattr(mc, "staging_table", None) or (str(row.iloc[0].get("staging_table")) if 'row' in locals() and pd.notna(row.iloc[0].get("staging_table")) else None)
-        if not canonical:
-            # Fallback to source_object or object name if it looks like a table
-            canonical = source_object
+    if raw_layer_path and str(raw_layer_path).startswith("s3://"):
+        can_src = "S3"
+        canonical = str(raw_layer_path).strip("/")
+    elif raw_layer_path and str(raw_layer_path).startswith("az://"):
+        can_src = "ADLS"
+        canonical = str(raw_layer_path).strip("/")
+    elif source_folder and str(source_folder).startswith("s3://"):
+        can_src = "S3"
+        canonical = f"{str(source_folder).rstrip('/')}/{source_object}".strip("/")
+    elif source_folder and str(source_folder).startswith("az://"):
+        can_src = "ADLS"
+        canonical = f"{str(source_folder).rstrip('/')}/{source_object}".strip("/")
+    elif can_src == "FABRIC":
+        canonical = (
+            getattr(mc, "staging_table", None)
+            or (str(row.iloc[0].get("staging_table")) if "row" in locals() and pd.notna(row.iloc[0].get("staging_table")) else None)
+            or source_object
+        )
     elif raw_layer_path:
-        canonical = raw_layer_path.strip("/")
-    elif source_folder and (source_folder.startswith("az://") or source_folder.startswith("s3://")):
-        canonical = f"{source_folder.rstrip('/')}/{source_object}"
+        canonical = str(raw_layer_path).strip("/")
     else:
         canonical = f"{(source_folder or '').strip('/')}/{source_object}".strip("/")
+
     try:
         connector = get_mcp_connector(can_src or source_type)
         content = connector.get_file_content(canonical, resolved_client)
@@ -734,14 +902,16 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
         try:
             if mc:
                 schema_payload = {"columns": [{"name": c["name"], "data_type": c["inferred_type"], "nullable": True} for c in cols], "preview_rows": preview_rows}
-                db_mc = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+                db_mc = db.query(MasterConfigAuthoritative).filter(
+                    MasterConfigAuthoritative.dataset_id == resolved_dataset_id
+                ).first()
                 if db_mc:
                     db_mc.schema = schema_payload
                     db.commit()
         except Exception as persist_exc:
-            logger.warning(f"Failed to persist inferred schema for {dataset_id}: {persist_exc}")
+            logger.warning(f"Failed to persist inferred schema for {resolved_dataset_id}: {persist_exc}")
 
-        return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
+        return {"dataset_id": resolved_dataset_id, "client_name": resolved_client, "columns": cols}
     except Exception:
         try:
             buf = BytesIO(content)
@@ -756,14 +926,16 @@ def get_dataset_columns(dataset_id: str, client_name: Optional[str] = None, db: 
             try:
                 if mc:
                     schema_payload = {"columns": [{"name": c["name"], "data_type": "unknown", "nullable": True} for c in cols], "preview_rows": preview_rows}
-                    db_mc = db.query(MasterConfigAuthoritative).filter(MasterConfigAuthoritative.dataset_id == dataset_id).first()
+                    db_mc = db.query(MasterConfigAuthoritative).filter(
+                        MasterConfigAuthoritative.dataset_id == resolved_dataset_id
+                    ).first()
                     if db_mc:
                         db_mc.schema = schema_payload
                         db.commit()
             except Exception as persist_exc:
-                logger.warning(f"Failed to persist inferred parquet schema for {dataset_id}: {persist_exc}")
+                logger.warning(f"Failed to persist inferred parquet schema for {resolved_dataset_id}: {persist_exc}")
 
-            return {"dataset_id": dataset_id, "client_name": resolved_client, "columns": cols}
+            return {"dataset_id": resolved_dataset_id, "client_name": resolved_client, "columns": cols}
         except Exception as e2:
             logger.error(f"Schema inference failed: {e2}")
             raise HTTPException(status_code=400, detail=f"Unable to infer columns: {e2}")

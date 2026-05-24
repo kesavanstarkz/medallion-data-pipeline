@@ -131,42 +131,57 @@ export default function StepDeployment({
                 if (!resp.ok) return; // keep defaults
                 const body = await resp.json();
                 if (!mounted) return;
-                const activities =
-                    body.activities ||
-                    body.pipeline?.properties?.activities ||
-                    [];
-                // Prefer first copy activity
-                const copy =
-                    activities.find((a) => a.type === "Copy") ||
-                    activities[0] ||
-                    null;
-                if (!copy) return;
                 const role =
                     deploymentStrategy === "MODIFY_SOURCE" ? "source" : "sink";
-                const roleInfo = (copy.typeProperties || {})[role] || {};
+                const detectedList =
+                    role === "source"
+                        ? body.detected_source_types
+                        : body.detected_sink_types;
+                const inspectActivities = body.activities || [];
+                const copyFromInspect =
+                    inspectActivities.find((a) => a.type === "Copy") ||
+                    inspectActivities[0] ||
+                    null;
+                const pipelineActivities =
+                    body.pipeline?.properties?.activities || [];
+                const copyFromPipeline =
+                    pipelineActivities.find((a) => a.type === "Copy") ||
+                    pipelineActivities[0] ||
+                    null;
+                const roleFromInspect = copyFromInspect?.roles?.[role] || {};
+                const roleFromPipeline =
+                    (copyFromPipeline?.typeProperties || {})[role] || {};
+                const directConnectionId =
+                    role === "source"
+                        ? body.source_connection_id
+                        : body.sink_connection_id;
+                const directConnectorType =
+                    role === "source" ? body.source_type : body.sink_type;
                 const detected =
-                    roleInfo.connector_type ||
-                    roleInfo.raw_type ||
-                    (body[`detected_${role}_types`] &&
-                        body[`detected_${role}_types`][0]) ||
+                    (Array.isArray(detectedList) && detectedList[0]) ||
+                    directConnectorType ||
+                    roleFromInspect.connector_type ||
+                    roleFromInspect.raw_type ||
                     "";
-                // Only set defaults if user hasn't already changed selection from initial default
-                if (deploymentStrategy === "MODIFY_SOURCE") {
-                    setSourceType((prev) =>
-                        prev === "REST" ? detected || prev : prev,
-                    );
-                } else {
-                    setSinkType((prev) =>
-                        prev === "REST" ? detected || prev : prev,
-                    );
+                if (detected) {
+                    if (deploymentStrategy === "MODIFY_SOURCE") {
+                        setSourceType(detected);
+                    } else {
+                        setSinkType(detected);
+                    }
                 }
 
-                // Prefill params based on datasetSettings
-                const ds = roleInfo.datasetSettings || {};
+                // Prefill params from inspect roles or exported pipeline typeProperties
+                const ds =
+                    roleFromInspect.datasetSettings ||
+                    roleFromPipeline.datasetSettings ||
+                    {};
                 const ext = ds.externalReferences || {};
                 const tprops = ds.typeProperties || {};
                 const guessed = {};
-                if (ext.connection) guessed.connection_id = ext.connection;
+                if (directConnectionId || ext.connection)
+                    guessed.connection_id =
+                        directConnectionId || ext.connection;
                 if (tprops.relativeUrl)
                     guessed.relative_url = tprops.relativeUrl;
                 // For file-based datasets

@@ -5,6 +5,7 @@ import zipfile
 import io
 import copy
 import logging
+import os
 from fastapi import HTTPException
 
 from services.fabric.entity_resolver import log_export_context
@@ -51,6 +52,7 @@ SINK_TYPE_MAP = {
 
 class FabricDeployService:
     def __init__(self, access_token: str):
+        self.access_token = access_token
         self.headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
@@ -93,43 +95,44 @@ class FabricDeployService:
 
         # 2. Check if pipeline exists in workspace
         url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            items_resp = await client.get(f"{url}?type=DataPipeline", headers=self.headers)
-            items = items_resp.json().get("value", [])
-            existing = next((i for i in items if i['displayName'] == pipeline_name), None)
-            
-            definition_b64 = base64.b64encode(json.dumps(definition_dict).encode('utf-8')).decode('utf-8')
-            
-            if existing:
-                # Update Definition
-                update_url = f"{url}/{existing['id']}/updateDefinition"
-                payload = {
-                    "definition": {
-                        "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
-                    }
+        from services.fabric.auth_service import execute_fabric_request
+        
+        items_resp = await execute_fabric_request(self, "GET", f"{url}?type=DataPipeline")
+        items = items_resp.json().get("value", []) if items_resp.is_success else []
+        existing = next((i for i in items if i['displayName'] == pipeline_name), None)
+        
+        definition_b64 = base64.b64encode(json.dumps(definition_dict).encode('utf-8')).decode('utf-8')
+        
+        if existing:
+            # Update Definition
+            update_url = f"{url}/{existing['id']}/updateDefinition"
+            payload = {
+                "definition": {
+                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
                 }
-                resp = await client.post(update_url, headers=self.headers, json=payload)
-                pipeline_id = existing['id']
-            else:
-                # Create New
-                payload = {
-                    "displayName": pipeline_name,
-                    "type": "DataPipeline",
-                    "definition": {
-                        "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
-                    }
-                }
-                resp = await client.post(url, headers=self.headers, json=payload)
-                pipeline_id = resp.json().get('id') if resp.is_success else None
-
-            if not resp.is_success:
-                 raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error: {resp.text}")
-            
-            return {
-                "id": pipeline_id,
-                "displayName": pipeline_name,
-                "status": "Success"
             }
+            resp = await execute_fabric_request(self, "POST", update_url, json=payload)
+            pipeline_id = existing['id']
+        else:
+            # Create New
+            payload = {
+                "displayName": pipeline_name,
+                "type": "DataPipeline",
+                "definition": {
+                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
+                }
+            }
+            resp = await execute_fabric_request(self, "POST", url, json=payload)
+            pipeline_id = resp.json().get('id') if resp.is_success else None
+
+        if not resp.is_success:
+             raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error: {resp.text}")
+        
+        return {
+            "id": pipeline_id,
+            "displayName": pipeline_name,
+            "status": "Success"
+        }
 
     async def clone_pipeline(
         self,
@@ -166,52 +169,69 @@ class FabricDeployService:
         
         # 2. Check for name collisions in Target and resolve versioning
         url = f"{FABRIC_API_BASE}/workspaces/{target_workspace_id}/items"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            items_resp = await client.get(f"{url}?type=DataPipeline", headers=self.headers)
-            pipelines = items_resp.json().get("value", [])
-            
-            final_name = new_name
-            version = 1
-            while any(p.get("displayName") == final_name for p in pipelines):
-                final_name = f"{new_name}_v{version}"
-                version += 1
+        from services.fabric.auth_service import execute_fabric_request
+        
+        items_resp = await execute_fabric_request(self, "GET", f"{url}?type=DataPipeline")
+        pipelines = items_resp.json().get("value", []) if items_resp.is_success else []
+        
+        final_name = new_name
+        version = 1
+        while any(p.get("displayName") == final_name for p in pipelines):
+            final_name = f"{new_name}_v{version}"
+            version += 1
 
-            # 3. Create in Target
-            payload = {
-                "displayName": final_name,
-                "type": "DataPipeline",
-                "definition": {
-                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
-                }
+        # 3. Create in Target
+        payload = {
+            "displayName": final_name,
+            "type": "DataPipeline",
+            "definition": {
+                "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
             }
+        }
+        
+        resp = await execute_fabric_request(self, "POST", url, json=payload)
+        if not resp.is_success:
+            if resp.status_code == 403 or "InsufficientPrivileges" in resp.text:
+                client_id = os.getenv("AZURE_CLIENT_ID", "unknown")
+                msg = (
+                    f"403 Forbidden: Service Principal '{client_id}' lacks access to workspace '{target_workspace_id}'. "
+                    f"Add it as Admin/Member in Fabric workspace settings and enable 'Allow service principals to use Power BI APIs' in tenant developer settings."
+                )
+                raise HTTPException(status_code=403, detail=msg)
+            raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during clone: {resp.text}")
             
-            resp = await client.post(url, headers=self.headers, json=payload)
-            if not resp.is_success:
-                raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during clone: {resp.text}")
-            
-            resp_json = resp.json()
-            return {
-                "id": resp_json.get('id'),
-                "displayName": final_name,
-                "status": "Success"
-            }
+        resp_json = resp.json()
+        return {
+            "id": resp_json.get('id'),
+            "displayName": final_name,
+            "status": "Success"
+        }
 
     async def reuse_pipeline(self, workspace_id: str, pipeline_id: str):
         """Select an existing pipeline for reuse without creating or mutating Fabric artifacts."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}",
-                headers=self.headers,
-            )
-            if not resp.is_success:
-                raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during reuse: {resp.text}")
-            item = resp.json()
-            return {
-                "id": item.get("id") or pipeline_id,
-                "displayName": item.get("displayName") or item.get("name"),
-                "status": "Success",
-                "mode": "reuse",
-            }
+        from services.fabric.auth_service import execute_fabric_request
+        resp = await execute_fabric_request(
+            self,
+            "GET",
+            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}"
+        )
+        if not resp.is_success:
+            if resp.status_code == 403 or "InsufficientPrivileges" in resp.text:
+                client_id = os.getenv("AZURE_CLIENT_ID", "unknown")
+                msg = (
+                    f"403 Forbidden: Service Principal '{client_id}' lacks access to workspace '{workspace_id}'. "
+                    f"Add it as Admin/Member in Fabric workspace settings and enable 'Allow service principals to use Power BI APIs' in tenant developer settings."
+                )
+                raise HTTPException(status_code=403, detail=msg)
+            raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during reuse: {resp.text}")
+            
+        item = resp.json()
+        return {
+            "id": item.get("id") or pipeline_id,
+            "displayName": item.get("displayName") or item.get("name"),
+            "status": "Success",
+            "mode": "reuse",
+        }
 
     async def mutate_pipeline(
         self,
@@ -522,7 +542,7 @@ class FabricDeployService:
         # If an explicit base_url is provided, allow creating a dynamic REST connection
         base_url = params.get("base_url") or params.get("url")
         if base_url and not require_existing:
-            return self._create_rest_connection(connection_name or "Dynamic_REST_Connection", base_url)
+            return await self._create_rest_connection(connection_name or "Dynamic_REST_Connection", base_url)
 
         # Nothing we can do: return clear error
         raise HTTPException(
@@ -537,7 +557,7 @@ class FabricDeployService:
         if not connection_id and params.get("ref_pipeline_id"):
             connection_id = await self._extract_rest_connection_id(workspace_id, params["ref_pipeline_id"], role)
         if not connection_id and (params.get("base_url") or params.get("url")):
-            connection_id = self._create_rest_connection(
+            connection_id = await self._create_rest_connection(
                 params.get("connection_name") or f"Dynamic_REST_{role.title()}_Connection",
                 params.get("base_url") or params.get("url"),
             )
@@ -582,31 +602,15 @@ class FabricDeployService:
         preferred = [ref for ref in refs if ref["role"] == preferred_role and "Rest" in ref["connector_type"]]
         return (preferred or refs or [{}])[0].get("connection_id")
 
-    def _create_rest_connection(self, display_name: str, base_url: str) -> str:
-        payload = {
-            "connectivityType": "ShareableCloud",
-            "displayName": display_name,
-            "connectionDetails": {
-                "type": "Web",
-                "creationMethod": "Web",
-                "parameters": [{"dataType": "Text", "name": "url", "value": base_url}],
-            },
-            "privacyLevel": "Organizational",
-            "credentialDetails": {
-                "singleSignOnType": "None",
-                "connectionEncryption": "NotEncrypted",
-                "skipTestConnection": True,
-                "credentials": {"credentialType": "Anonymous"},
-            },
-        }
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.post(f"{FABRIC_API_BASE}/connections", headers=self.headers, json=payload)
-        if not resp.is_success:
-            raise HTTPException(status_code=resp.status_code, detail=f"REST connection creation failed: {resp.text}")
-        connection_id = resp.json().get("id")
-        if not connection_id:
-            raise HTTPException(status_code=502, detail="REST connection creation did not return an id")
-        return connection_id
+    async def _create_rest_connection(self, display_name: str, base_url: str) -> str:
+        from services.fabric.connection_service import FabricConnectionService
+
+        token = self.headers["Authorization"].replace("Bearer ", "")
+        connection_service = FabricConnectionService(token)
+        return await connection_service.get_or_create_rest_connection(
+            base_url,
+            display_name,
+        )
 
     def _build_sql_endpoint(self, params: dict, role: str) -> dict:
         if role == "source":
@@ -929,24 +933,33 @@ class FabricDeployService:
     async def _create_pipeline_from_definition(self, workspace_id: str, requested_name: str, definition_dict: dict):
         definition_b64 = base64.b64encode(json.dumps(definition_dict).encode("utf-8")).decode("utf-8")
         items_url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            items_resp = await client.get(f"{items_url}?type=DataPipeline", headers=self.headers)
-            pipelines = items_resp.json().get("value", [])
-            final_name = requested_name
-            version = 1
-            while any(p.get("displayName") == final_name for p in pipelines):
-                final_name = f"{requested_name}_v{version}"
-                version += 1
+        from services.fabric.auth_service import execute_fabric_request
+        
+        items_resp = await execute_fabric_request(self, "GET", f"{items_url}?type=DataPipeline")
+        pipelines = items_resp.json().get("value", []) if items_resp.is_success else []
+        final_name = requested_name
+        version = 1
+        while any(p.get("displayName") == final_name for p in pipelines):
+            final_name = f"{requested_name}_v{version}"
+            version += 1
 
-            payload = {
-                "displayName": final_name,
-                "type": "DataPipeline",
-                "definition": {
-                    "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
-                },
-            }
-            resp = await client.post(items_url, headers=self.headers, json=payload)
-            if not resp.is_success:
-                raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during mutation: {resp.text}")
-            body = resp.json()
-            return {"id": body.get("id"), "displayName": final_name, "status": "Success", "fabric_response": body}
+        payload = {
+            "displayName": final_name,
+            "type": "DataPipeline",
+            "definition": {
+                "parts": [{"path": "pipeline-content.json", "payload": definition_b64, "payloadType": "InlineBase64"}]
+            },
+        }
+        resp = await execute_fabric_request(self, "POST", items_url, json=payload)
+        if not resp.is_success:
+            if resp.status_code == 403 or "InsufficientPrivileges" in resp.text:
+                client_id = os.getenv("AZURE_CLIENT_ID", "unknown")
+                msg = (
+                    f"403 Forbidden: Service Principal '{client_id}' lacks access to workspace '{workspace_id}'. "
+                    f"Add it as Admin/Member in Fabric workspace settings and enable 'Allow service principals to use Power BI APIs' in tenant developer settings."
+                )
+                raise HTTPException(status_code=403, detail=msg)
+            raise HTTPException(status_code=resp.status_code, detail=f"Fabric API error during mutation: {resp.text}")
+            
+        body = resp.json()
+        return {"id": body.get("id"), "displayName": final_name, "status": "Success", "fabric_response": body}

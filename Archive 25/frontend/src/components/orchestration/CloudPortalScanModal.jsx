@@ -399,7 +399,7 @@ export default function CloudPortalScanModal({ selectedClient, initialTarget = '
                   )}
                   {!!(fabricTokenValidation.missing_scopes || []).length && (
                     <div style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>
-                      {`Please grant delegated Microsoft Fabric API permissions:\n- Workspace.ReadWrite.All\n- Item.ReadWrite.All\n- Item.Execute.All\n\nThen provide admin consent.`}
+                      {`Please grant delegated Microsoft Fabric API permissions:\n- Workspace.ReadWrite.All\n- Item.ReadWrite.All\n- Item.Execute.All\n- Connection.ReadWrite.All\n\nThen provide admin consent.`}
                     </div>
                   )}
                 </div>

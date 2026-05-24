@@ -20,6 +20,7 @@ _auth_flows: Dict[str, Dict[str, Any]] = {}
 _auth_results: Dict[str, Dict[str, Any]] = {}
 _MSAL_RESERVED_SCOPES = {"openid", "profile", "offline_access"}
 _FABRIC_REQUIRED_EXECUTION_SCOPES = {
+    "Connection.ReadWrite.All",
     "Item.Execute.All",
     "Item.ReadWrite.All",
     "Workspace.ReadWrite.All",

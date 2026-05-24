@@ -122,7 +122,7 @@ const TARGETS = [
     },
 ];
 
-const HIDE_TEMP_INTELLIGENCE_ACTIONS = true;
+const HIDE_TEMP_INTELLIGENCE_ACTIONS = false;
 
 function JsonBlock({ value }) {
     return (
@@ -244,15 +244,33 @@ function renderEvidenceMeta(value) {
 
 function renderListItems(items, formatter) {
     if (!Array.isArray(items) || !items.length) return null;
-    return items.map((item, index) => (
-        <div key={index}>{formatter(item, index)}</div>
-    ));
+    return items.map((item, index) => {
+        const safeItem = item ?? {};
+        try {
+            return <div key={index}>{formatter(safeItem, index)}</div>;
+        } catch (renderError) {
+            console.warn("PipelineIntelligence list item render failed", {
+                index,
+                item,
+                renderError,
+            });
+            return <div key={index}>{compactValue(item)}</div>;
+        }
+    });
 }
 
 function prettyLabel(value) {
     return String(value || "")
         .replace(/_/g, " ")
         .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function upperOrFallback(value, fallback = "N/A") {
+    return String(value ?? fallback).toUpperCase();
+}
+
+function logApiResponse(label, payload) {
+    console.log(`PipelineIntelligence ${label} API response:`, payload);
 }
 
 function compactValue(value) {
@@ -672,6 +690,7 @@ export default function PipelineIntelligence({
             });
             if (!response.ok) throw new Error("Analysis failed");
             const result = await response.json();
+            logApiResponse("/discovery/analyze", result);
             const finalResult = {
                 ...result,
                 scan_status: "success",
@@ -701,6 +720,7 @@ export default function PipelineIntelligence({
             });
             if (!response.ok) throw new Error("API scan failed");
             const result = await response.json();
+            logApiResponse("/discovery/api-scan", result);
             setData(result);
             onScanComplete?.(result);
         } catch (e) {
@@ -848,6 +868,7 @@ export default function PipelineIntelligence({
                 },
             );
             const payload = await response.json();
+            logApiResponse("/discovery/fabric-runtime-intelligence", payload);
             if (requestId !== runtimeCaptureRequestRef.current) return;
             if (!response.ok) {
                 if (payload?.detail && typeof payload.detail === "object") {
@@ -929,6 +950,7 @@ export default function PipelineIntelligence({
                 },
             );
             const payload = await response.json();
+            logApiResponse("/discovery/fabric-runtime-source-preview", payload);
             if (requestId !== runtimePreviewRequestRef.current) return;
             if (!response.ok) {
                 const detail = payload.detail;
@@ -984,6 +1006,10 @@ export default function PipelineIntelligence({
                 },
             );
             const payload = await response.json();
+            logApiResponse(
+                "/discovery/fabric-runtime-source-preview target",
+                payload,
+            );
             if (requestId !== runtimePreviewRequestRef.current) return;
             if (!response.ok) {
                 const detail = payload.detail;
@@ -1083,7 +1109,16 @@ export default function PipelineIntelligence({
     };
 
     const handleSaveRuntimeSource = async () => {
-        if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) return;
+        if (!runtimeDiscovery || !Object.keys(runtimeDiscovery).length) {
+            setRuntimeActionMessage(
+                "Run Runtime Intelligence capture before saving the source.",
+            );
+            return;
+        }
+        if (!clientName) {
+            setRuntimeActionMessage("Select a client before saving the source.");
+            return;
+        }
         setRuntimeSaveLoading(true);
         setRuntimeActionMessage("");
         try {
@@ -1100,6 +1135,23 @@ export default function PipelineIntelligence({
                         pipeline_id: selectedPipelineRef.current?.id || null,
                         runtime_source_discovery: {
                             ...runtimeDiscovery,
+                            schema_discovery:
+                                runtimeDiscovery?.schema_discovery ||
+                                (runtimeSchemaDiscovery?.columns?.length
+                                    ? runtimeSchemaDiscovery
+                                    : runtimePreview
+                                      ? {
+                                            columns: (
+                                                runtimePreview.columns || []
+                                            ).map((col) => ({
+                                                column_name: col.name,
+                                                data_type: col.type,
+                                                nullable: col.nullable,
+                                            })),
+                                            sample_rows:
+                                                runtimePreview.rows || [],
+                                        }
+                                      : {}),
                             source_connection: {
                                 ...runtimeSourceConnection,
                                 workspace_id:
@@ -1113,6 +1165,7 @@ export default function PipelineIntelligence({
                 },
             );
             const payload = await response.json();
+            logApiResponse("/discovery/fabric-runtime-source-save", payload);
             if (!response.ok)
                 throw new Error(
                     payload.detail || "Failed to save runtime source.",
@@ -1321,6 +1374,7 @@ export default function PipelineIntelligence({
                 apiUrl(`/config/targets/${clientName}`),
             );
             const targets = await response.json();
+            logApiResponse(`/config/targets/${clientName}`, targets);
             setAvailableTargets(targets || []);
 
             if (!targets || targets.length === 0) {
@@ -1374,6 +1428,7 @@ export default function PipelineIntelligence({
             });
 
             const result = await response.json();
+            logApiResponse("/config/targets/save-data", result);
 
             if (response.ok) {
                 setSaveProgress((prev) => [...prev, "Finalizing..."]);
@@ -1710,42 +1765,51 @@ export default function PipelineIntelligence({
                                                 gap: 8,
                                             }}
                                         >
-                                            {saveSchema.map((c) => (
-                                                <div
-                                                    key={c.name}
-                                                    style={{
-                                                        display: "flex",
-                                                        alignItems: "center",
-                                                        gap: 8,
-                                                        fontSize: 11,
-                                                        background: "#fff",
-                                                        padding: "4px 8px",
-                                                        borderRadius: 6,
-                                                        border: "1px solid #e0f2fe",
-                                                    }}
-                                                >
-                                                    <FiCheck color="#10b981" />
-                                                    <span
+                                            {saveSchema.map((c, index) => {
+                                                const column = c || {};
+                                                return (
+                                                    <div
+                                                        key={
+                                                            column.name ||
+                                                            `schema-${index}`
+                                                        }
                                                         style={{
-                                                            fontWeight: 700,
+                                                            display: "flex",
+                                                            alignItems:
+                                                                "center",
+                                                            gap: 8,
+                                                            fontSize: 11,
+                                                            background: "#fff",
+                                                            padding: "4px 8px",
+                                                            borderRadius: 6,
+                                                            border: "1px solid #e0f2fe",
                                                         }}
                                                     >
-                                                        {c.name}
-                                                    </span>
-                                                    <span
-                                                        style={{
-                                                            opacity: 0.6,
-                                                            fontSize: 10,
-                                                        }}
-                                                    >
-                                                        (
-                                                        {String(
-                                                            c.type,
-                                                        ).toUpperCase()}
-                                                        )
-                                                    </span>
-                                                </div>
-                                            ))}
+                                                        <FiCheck color="#10b981" />
+                                                        <span
+                                                            style={{
+                                                                fontWeight: 700,
+                                                            }}
+                                                        >
+                                                            {column.name ||
+                                                                "Unnamed column"}
+                                                        </span>
+                                                        <span
+                                                            style={{
+                                                                opacity: 0.6,
+                                                                fontSize: 10,
+                                                            }}
+                                                        >
+                                                            (
+                                                            {upperOrFallback(
+                                                                column.type,
+                                                                "STRING",
+                                                            )}
+                                                            )
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
                                             {saveSchema.length === 0 && (
                                                 <div
                                                     style={{
@@ -2250,7 +2314,7 @@ export default function PipelineIntelligence({
                                             onClick={handlePreviewRuntimeSource}
                                             disabled={
                                                 runtimePreviewLoading ||
-                                                !runtimeSourceConnection.artifact_id
+                                                !(runtimeSourceConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiEye />{" "}
@@ -2262,7 +2326,7 @@ export default function PipelineIntelligence({
                                             className="pi-btn-confirm"
                                             onClick={handleUseRuntimeSource}
                                             disabled={
-                                                !runtimeSourceConnection.artifact_id
+                                                !(runtimeSourceConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiCheck /> Use Source
@@ -2272,7 +2336,7 @@ export default function PipelineIntelligence({
                                             onClick={handleSaveRuntimeSource}
                                             disabled={
                                                 runtimeSaveLoading ||
-                                                !runtimeSourceConnection.artifact_id
+                                                !(runtimeSourceConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiSave />{" "}
@@ -2294,7 +2358,7 @@ export default function PipelineIntelligence({
                                                 handleBuildPipelineFromSource
                                             }
                                             disabled={
-                                                !runtimeSourceConnection.artifact_id
+                                                !(runtimeSourceConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiGitBranch /> Build Pipeline From
@@ -2360,15 +2424,17 @@ export default function PipelineIntelligence({
                                                                 }}
                                                             >
                                                                 [
-                                                                {item.strategy
-                                                                    .replace(
-                                                                        /_/g,
-                                                                        " ",
-                                                                    )
-                                                                    .toUpperCase()}
+                                                                {upperOrFallback(
+                                                                    item.strategy,
+                                                                ).replace(
+                                                                    /_/g,
+                                                                    " ",
+                                                                )}
                                                                 ]
                                                             </span>{" "}
-                                                            {item.status.toUpperCase()}
+                                                            {upperOrFallback(
+                                                                item.status,
+                                                            )}
                                                             {item.artifact_id && (
                                                                 <span>
                                                                     {" "}
@@ -2435,7 +2501,7 @@ export default function PipelineIntelligence({
                                             onClick={handlePreviewRuntimeTarget}
                                             disabled={
                                                 runtimePreviewLoading ||
-                                                !runtimeTargetConnection.artifact_id
+                                                !(runtimeTargetConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiEye />{" "}
@@ -2448,7 +2514,7 @@ export default function PipelineIntelligence({
                                             style={HIDE_TEMP_INTELLIGENCE_ACTIONS ? { display: "none" } : undefined}
                                             onClick={handleUseRuntimeTarget}
                                             disabled={
-                                                !runtimeTargetConnection.artifact_id
+                                                !(runtimeTargetConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiCheck /> Use Target
@@ -2459,7 +2525,7 @@ export default function PipelineIntelligence({
                                             onClick={handleSaveRuntimeTarget}
                                             disabled={
                                                 runtimeSaveLoading ||
-                                                !runtimeTargetConnection.artifact_id
+                                                !(runtimeTargetConnection.artifact_id || selectedPipeline?.id || data?.pipeline_id)
                                             }
                                         >
                                             <FiSave />{" "}

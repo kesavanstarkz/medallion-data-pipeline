@@ -10,6 +10,7 @@ from loguru import logger
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
 FABRIC_API_SCOPE = "https://api.fabric.microsoft.com/.default"
 ONELAKE_STORAGE_SCOPE = "https://storage.azure.com/.default"
+FABRIC_CONNECTION_READWRITE_SCOPE = "Connection.ReadWrite.All"
 
 # Global cache for Fabric tokens to persist across steps
 # Keyed by a simple 'current' key for now, or could be keyed by client/user if needed
@@ -40,9 +41,12 @@ def resolve_fabric_token(request_or_header: str = None) -> str:
     if request_or_header:
         token = request_or_header.replace("Bearer ", "").strip()
         if token and token != "null" and token != "undefined":
-            # Update cache if it's a new token
-            save_fabric_token(token)
-            return token
+            if _is_token_expired(token):
+                logger.warning("Provided Fabric token is expired; attempting configured fallback token resolution.")
+            else:
+                # Update cache if it's a new token
+                save_fabric_token(token)
+                return token
             
     # 2. Check cache
     cached = get_cached_fabric_token()
@@ -83,6 +87,22 @@ def _is_token_expired(token: str) -> bool:
         return False
     now = int(time.time())
     return int(exp) <= now
+
+
+def get_fabric_token_permissions(token: str) -> set[str]:
+    claims = _decode_jwt_unverified(token)
+    scopes = {
+        scope.strip()
+        for scope in str(claims.get("scp") or "").split(" ")
+        if scope.strip()
+    }
+    roles = claims.get("roles") if isinstance(claims.get("roles"), list) else []
+    return scopes | {str(role).strip() for role in roles if str(role).strip()}
+
+
+def fabric_token_has_permission(token: str, permission: str) -> bool:
+    permissions = get_fabric_token_permissions(token)
+    return permission in permissions or f"https://api.fabric.microsoft.com/{permission}" in permissions
 
 
 def _get_client_token_sync(scope: str = FABRIC_API_SCOPE) -> str:
@@ -174,7 +194,15 @@ class FabricAuthService:
 
     def get_auth_url(self, redirect_uri):
         """Get URL for Interactive SSO login"""
-        scope = "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All https://api.fabric.microsoft.com/Item.ReadWrite.All offline_access"
+        scope = (
+            "https://api.fabric.microsoft.com/Workspace.ReadWrite.All "
+            "https://api.fabric.microsoft.com/Item.ReadWrite.All "
+            "https://api.fabric.microsoft.com/Item.Execute.All "
+            "https://api.fabric.microsoft.com/Connection.ReadWrite.All "
+            "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All "
+            "https://api.fabric.microsoft.com/DataPipeline.Execute.All "
+            "offline_access"
+        )
         return (
             f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/authorize"
             f"?client_id={self.client_id}"
@@ -183,3 +211,86 @@ class FabricAuthService:
             f"&response_mode=query"
             f"&scope={scope}"
         )
+
+
+async def execute_fabric_request(service, method: str, url: str, **kwargs) -> httpx.Response:
+    """
+    Centralized HTTP request execution for Microsoft Fabric APIs.
+    Dynamically refreshes expired tokens and automatically retries once upon explicit token-expiry responses.
+    """
+    from services.fabric.auth_service import resolve_fabric_token, save_fabric_token, _get_client_token_sync
+    import httpx
+
+    # Resolve token dynamically (either active cache or client credentials fallback)
+    access_token = getattr(service, "access_token", None)
+    token = resolve_fabric_token(access_token) or access_token
+
+    headers = kwargs.pop("headers", None) or {}
+    headers["Authorization"] = f"Bearer {token}"
+    headers.setdefault("Content-Type", "application/json")
+
+    timeout = kwargs.pop("timeout", 30.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.request(method, url, headers=headers, **kwargs)
+
+        is_expired = False
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                message = str(body.get("message", ""))
+                error_code = str(body.get("errorCode") or "")
+                is_expired = (
+                    error_code == "TokenExpired"
+                    or "Access token has expired" in message
+                    or "token expired" in message.lower()
+                )
+        except Exception:
+            pass
+
+        if is_expired:
+            logger.warning(f"[Fabric API] Stale or expired token (status {resp.status_code}) encountered. Initiating dynamic refresh...")
+            # Attempt to refresh using central sync client credentials flow
+            new_token = _get_client_token_sync()
+            if new_token:
+                logger.info("[Fabric API] Access token refreshed successfully. Retrying the request once...")
+                save_fabric_token(new_token)
+                
+                # Update headers on the service instance if applicable
+                if hasattr(service, "access_token"):
+                    service.access_token = new_token
+                if hasattr(service, "headers") and isinstance(service.headers, dict):
+                    service.headers["Authorization"] = f"Bearer {new_token}"
+                
+                headers["Authorization"] = f"Bearer {new_token}"
+                resp = await client.request(method, url, headers=headers, **kwargs)
+            else:
+                logger.error("[Fabric API] Dynamic client-credentials token refresh failed.")
+
+        if resp.status_code == 401 and not is_expired:
+            permissions = sorted(get_fabric_token_permissions(token))
+            logger.error(
+                "[Fabric API] Unauthorized request was not treated as token expiry. "
+                "method={} url={} permissions={} response={}",
+                method,
+                url,
+                permissions,
+                resp.text,
+            )
+
+        # Intercept 403 / InsufficientPrivileges on the final response to output developer guidance
+        if resp.status_code == 403 or (resp.text and "InsufficientPrivileges" in resp.text):
+            workspace_id = "unknown"
+            if "/workspaces/" in url:
+                try:
+                    workspace_id = url.split("/workspaces/")[-1].split("/")[0]
+                except Exception:
+                    pass
+            logger.error(
+                f"[Fabric API] Fabric request failed with InsufficientPrivileges (403) for Workspace ID '{workspace_id}'. "
+                f"Active Client ID: {os.getenv('AZURE_CLIENT_ID')}. "
+                f"ACTION REQUIRED: Ensure this Service Principal has been added as an Admin or Member in the Fabric Workspace, "
+                f"and 'Allow service principals to use Power BI APIs' is enabled in the tenant developer settings."
+            )
+
+        return resp

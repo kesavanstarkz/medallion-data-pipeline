@@ -14,8 +14,10 @@ import base64
 import copy
 import json
 import logging
+import os
 from typing import Optional, Dict, Any, Tuple
 from enum import Enum
+from services.fabric_client import FabricAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,6 @@ class FabricPipelineService:
     def __init__(self, fabric_client):
         """Initialize with Fabric API client"""
         self.client = fabric_client
-        self.connector_mutator = ConnectorMutator(fabric_client)
     
     # ======================== DECODE/ENCODE ========================
     
@@ -313,6 +314,17 @@ class FabricPipelineService:
                 "parallel_copies": tp.get("parallelCopies"),
                 "data_integration_units": tp.get("dataIntegrationUnits"),
             }
+        except FabricAPIError as e:
+            if e.status_code == 403:
+                client_id = os.environ.get("FABRIC_CLIENT_ID", "unknown")
+                msg = (
+                    f"403 Forbidden: Service Principal '{client_id}' lacks access to workspace '{workspace_id}'. "
+                    f"Add it as Admin/Member in Fabric workspace settings and enable 'Allow service principals to use Power BI APIs' in tenant developer settings."
+                )
+                logger.error(msg)
+                raise Exception(msg) from e
+            logger.error(f"Error inspecting pipeline {pipeline_id}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error inspecting pipeline {pipeline_id}: {e}")
             raise
@@ -333,254 +345,18 @@ class FabricPipelineService:
                 "connections_found": len(refs),
                 "connections": refs,
             }
+        except FabricAPIError as e:
+            if e.status_code == 403:
+                client_id = os.environ.get("FABRIC_CLIENT_ID", "unknown")
+                msg = (
+                    f"403 Forbidden: Service Principal '{client_id}' lacks access to workspace '{workspace_id}'. "
+                    f"Add it as Admin/Member in Fabric workspace settings and enable 'Allow service principals to use Power BI APIs' in tenant developer settings."
+                )
+                logger.error(msg)
+                raise Exception(msg) from e
+            logger.error(f"Error extracting connections from {pipeline_id}: {e}")
+            raise
         except Exception as e:
             logger.error(f"Error extracting connections from {pipeline_id}: {e}")
             raise
-    
-    def clone(
-        self,
-        workspace_id: str,
-        pipeline_id: str,
-        clone_name: str,
-        mode: MutationMode = MutationMode.SOURCE,
-        source_type: Optional[str] = None,
-        sink_type: Optional[str] = None,
-        source_params: Optional[Dict[str, Any]] = None,
-        sink_params: Optional[Dict[str, Any]] = None,
-        source_connection_name: Optional[str] = None,
-        sink_connection_name: Optional[str] = None,
-        template_pipeline_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Clone a pipeline with optional source/sink mutation
-        
-        Supports mutating source, sink, or both based on provided parameters
-        """
-        try:
-            raw = self.client.get_pipeline_definition(workspace_id, pipeline_id)
-            content = self._decode_pipeline_definition(raw)
-            idx, original_activity = self._get_copy_activity(content)
-            mutated = copy.deepcopy(original_activity)
-            
-            # Validate mutation mode requirements
-            if mode in (MutationMode.SOURCE, MutationMode.BOTH) and not source_params:
-                raise ValueError("source_params required for SOURCE or BOTH mode")
-            if mode in (MutationMode.SINK, MutationMode.BOTH) and not sink_params:
-                raise ValueError("sink_params required for SINK or BOTH mode")
-            
-            # Apply source mutation
-            if mode in (MutationMode.SOURCE, MutationMode.BOTH):
-                self._mutate_source(
-                    mutated, original_activity, workspace_id,
-                    source_type, source_params, source_connection_name, template_pipeline_id
-                )
-            
-            # Apply sink mutation
-            if mode in (MutationMode.SINK, MutationMode.BOTH):
-                self._mutate_sink(
-                    mutated, original_activity, workspace_id,
-                    sink_type, sink_params, sink_connection_name, template_pipeline_id
-                )
-            
-            # Finalize and create pipeline
-            resolved = mutated.pop("_resolved", {})
-            final_activity = self._preserve_activity_properties(original_activity, mutated)
-            
-            cloned_content = copy.deepcopy(content)
-            cloned_content["properties"]["activities"][idx] = final_activity
-            cloned_content = self._inject_resources(cloned_content, resolved)
-            
-            definition = self._encode_pipeline_definition(raw, cloned_content)
-            result = self.client.create_pipeline(workspace_id, clone_name, definition)
-            
-            new_pipeline_id = result.get("id")
-            if not new_pipeline_id:
-                raise PipelineDefinitionError("Created pipeline ID not returned")
-            
-            self.client.update_pipeline_definition(workspace_id, new_pipeline_id, definition)
-            
-            return {
-                "pipeline_id": new_pipeline_id,
-                "display_name": result.get("displayName"),
-                "mode": mode.value,
-                "resolved_keys": list(resolved.keys()),
-            }
-        except Exception as e:
-            logger.error(f"Error cloning pipeline {pipeline_id}: {e}")
-            raise
-    
-    def reuse(self, workspace_id: str, pipeline_id: str) -> Dict[str, Any]:
-        """
-        Reuse an existing pipeline as-is
-        
-        Returns pipeline information without modification
-        """
-        try:
-            result = self.client.get_pipeline(workspace_id, pipeline_id)
-            return {
-                "pipeline_id": result.get("id"),
-                "display_name": result.get("displayName"),
-                "mode": "reuse",
-                "message": "Pipeline reused as-is",
-            }
-        except Exception as e:
-            logger.error(f"Error reusing pipeline {pipeline_id}: {e}")
-            raise
-    
-    # ======================== HELPER METHODS ========================
-    
-    def _detect_source_type(self, copy_activity: Dict[str, Any]) -> str:
-        """Detect the type of source connector"""
-        t = copy_activity.get("typeProperties", {}).get("source", {}).get("type", "")
-        detected = SOURCE_TYPE_MAP.get(t)
-        if not detected:
-            raise ValueError(f"Unknown source type: {t}")
-        return detected
-    
-    def _detect_sink_type(self, copy_activity: Dict[str, Any]) -> str:
-        """Detect the type of sink connector"""
-        t = copy_activity.get("typeProperties", {}).get("sink", {}).get("type", "")
-        detected = SINK_TYPE_MAP.get(t)
-        if not detected:
-            raise ValueError(f"Unknown sink type: {t}")
-        return detected
-    
-    def _mutate_source(
-        self,
-        mutated: Dict[str, Any],
-        original: Dict[str, Any],
-        workspace_id: str,
-        source_type: Optional[str],
-        source_params: Dict[str, Any],
-        connection_name: Optional[str],
-        template_pipeline_id: Optional[str],
-    ) -> None:
-        """Apply source mutation to activity"""
-        stype = source_type or self._detect_source_type(original)
-        
-        if stype == "REST":
-            connection_id = self._resolve_rest_connection_id(
-                workspace_id, source_params, connection_name, template_pipeline_id
-            )
-            relative_url = source_params.get("relative_url", "")
-            request_method = source_params.get("request_method") or source_params.get("method", "GET")
-            request_timeout = source_params.get("request_timeout", "00:01:40")
-            
-            mutated["typeProperties"]["source"] = self._build_rest_source(
-                connection_id, relative_url, request_method, request_timeout
-            )
-            
-            # Track old dataset to remove
-            old_inputs = original.get("inputs", [])
-            if old_inputs:
-                old_ds = old_inputs[0].get("referenceName")
-                if old_ds:
-                    mutated.setdefault("_resolved", {})["remove_src_ds"] = old_ds
-            mutated.pop("inputs", None)
-        else:
-            # Non-REST connector mutation would go here
-            # For now, REST is the primary focus
-            logger.warning(f"Non-REST source type {stype} mutation not yet implemented")
-    
-    def _mutate_sink(
-        self,
-        mutated: Dict[str, Any],
-        original: Dict[str, Any],
-        workspace_id: str,
-        sink_type: Optional[str],
-        sink_params: Dict[str, Any],
-        connection_name: Optional[str],
-        template_pipeline_id: Optional[str],
-    ) -> None:
-        """Apply sink mutation to activity"""
-        sktype = sink_type or self._detect_sink_type(original)
-        
-        if sktype == "REST":
-            connection_id = self._resolve_rest_connection_id(
-                workspace_id, sink_params, connection_name, template_pipeline_id
-            )
-            relative_url = sink_params.get("relative_url", "")
-            request_method = sink_params.get("request_method") or sink_params.get("method", "POST")
-            request_timeout = sink_params.get("request_timeout", "00:01:40")
-            
-            mutated["typeProperties"]["sink"] = self._build_rest_sink(
-                connection_id, relative_url, request_method, request_timeout
-            )
-            
-            # Track old dataset to remove
-            old_outputs = original.get("outputs", [])
-            if old_outputs:
-                old_ds = old_outputs[0].get("referenceName")
-                if old_ds:
-                    mutated.setdefault("_resolved", {})["remove_snk_ds"] = old_ds
-            mutated.pop("outputs", None)
-        else:
-            # Non-REST connector mutation would go here
-            logger.warning(f"Non-REST sink type {sktype} mutation not yet implemented")
-    
-    def _resolve_rest_connection_id(
-        self,
-        workspace_id: str,
-        params: Dict[str, Any],
-        connection_name: Optional[str],
-        template_pipeline_id: Optional[str],
-    ) -> str:
-        """
-        Resolve a REST connection UUID without calling connection API
-        
-        Resolution order:
-        1. params["connection_id"] - UUID supplied directly
-        2. template_pipeline_id - extract from template pipeline definition
-        3. params["ref_pipeline_id"] - extract from reference pipeline
-        4. Create new connection dynamically if base_url provided
-        """
-        # Priority 1: Direct UUID
-        if params.get("connection_id"):
-            return params["connection_id"]
-        
-        # Priority 2/3: Extract from template or ref pipeline
-        ref_pipeline = template_pipeline_id or params.get("ref_pipeline_id")
-        if ref_pipeline:
-            try:
-                connections = self.extract_connections(workspace_id, ref_pipeline)
-                if connections.get("connections"):
-                    cid = connections["connections"][0]["connection_id"]
-                    logger.info(f"Extracted connection_id={cid} from pipeline {ref_pipeline}")
-                    return cid
-            except Exception as e:
-                logger.warning(f"Could not extract connection from {ref_pipeline}: {e}")
-        
-        # Priority 4: Create new connection
-        base_url = params.get("base_url") or params.get("url")
-        if not base_url:
-            raise ValueError(
-                "Cannot resolve REST connection. No connection_id, "
-                "template_pipeline_id, or base_url provided."
-            )
-        
-        display_name = connection_name or "Dynamic_REST_Connection"
-        logger.info(f"Creating connection '{display_name}' for {base_url}")
-        
-        resp = self.client.create_rest_connection(
-            display_name=display_name,
-            base_url=base_url
-        )
-        cid = resp.get("id")
-        if not cid:
-            raise ValueError(f"Failed to create REST connection: {resp}")
-        
-        logger.info(f"Created connection_id={cid}")
-        return cid
 
-
-class ConnectorMutator:
-    """Helper class for connector-specific mutations"""
-    
-    def __init__(self, fabric_client):
-        self.client = fabric_client
-    
-    def resolve_connection(self, adapter, connection_name: str, params: Dict[str, Any]) -> str:
-        """Resolve connection for non-REST connectors"""
-        # This would handle ADLS, SQL, Lakehouse, etc.
-        # For now, placeholder
-        return connection_name

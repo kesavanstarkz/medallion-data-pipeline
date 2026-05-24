@@ -747,32 +747,63 @@ class FabricConnector(MCPSourceConnector):
             # If the DB probe fails, log and continue to try file-based reads
             logger.debug(f"FabricConnector DB probe failed for {staging_table}: {e}")
 
-        # 2) Attempt to treat as file artifact. Try connector choices based on common prefixes.
+        # 2) Try to resolve type-based routing by checking authoritative database configuration
         try:
-            # Heuristics: s3://, az://, Raw/ or blob-like names
+            from core.database import SessionLocal
+            from models.master_config_authoritative import MasterConfigAuthoritative
+            db = SessionLocal()
+            authoritative = None
+            try:
+                # Query for an authoritative row with matching client and dataset_id or raw path
+                query = db.query(MasterConfigAuthoritative).filter(
+                    MasterConfigAuthoritative.client_name == client_name,
+                    MasterConfigAuthoritative.is_active == True
+                )
+                
+                # Check for direct path match
+                authoritative = query.filter(MasterConfigAuthoritative.raw_layer_path == file_path_canonical).first()
+                if not authoritative:
+                    # Fallback to finding any non-FABRIC active row for this client
+                    authoritative = query.filter(MasterConfigAuthoritative.source_type != "FABRIC").first()
+            finally:
+                db.close()
+                
+            if authoritative:
+                logger.info(f"FabricConnector type-based routing matched registered source_type '{authoritative.source_type}' for client '{client_name}'")
+                from core.mcp_connector import get_mcp_connector
+                resolved_connector = get_mcp_connector(authoritative.source_type)
+                # Ensure we avoid circular invocation of FabricConnector itself
+                if resolved_connector.__class__.__name__ != "FabricConnector":
+                    target_path = authoritative.raw_layer_path or file_path_canonical
+                    return resolved_connector.get_file_content(target_path, client_name)
+        except Exception as routing_err:
+            logger.debug(f"FabricConnector type-based routing resolution failed: {routing_err}")
+
+        # 3) Fall back to safe type-based heuristics based on path prefixes
+        try:
             cp = (file_path_canonical or "")
-            connectors_to_try = []
             if cp.startswith("s3://"):
-                connectors_to_try = [S3Connector()]
+                c = S3Connector()
+                logger.info(f"FabricConnector routing to S3Connector for {file_path_canonical}")
+                return c.get_file_content(file_path_canonical, client_name)
             elif cp.startswith("az://") or cp.startswith("azdls://"):
-                connectors_to_try = [ADLSConnector()]
-            else:
-                # Local (Raw layer) first, then ADLS/S3 fallbacks
-                connectors_to_try = [LocalConnector(), ADLSConnector(), S3Connector(), APIConnector()]
-
-            last_err = None
-            for c in connectors_to_try:
+                c = ADLSConnector()
+                logger.info(f"FabricConnector routing to ADLSConnector for {file_path_canonical}")
+                return c.get_file_content(file_path_canonical, client_name)
+            elif "Raw/" in cp or "/" not in cp:
+                c = LocalConnector()
+                logger.info(f"FabricConnector routing to LocalConnector for {file_path_canonical}")
+                return c.get_file_content(file_path_canonical, client_name)
+            
+            # Absolute fallback: try ADLS and Local
+            for c in [LocalConnector(), ADLSConnector()]:
                 try:
-                    logger.info(f"FabricConnector: trying connector {c.__class__.__name__} for {file_path_canonical}")
-                    content = c.get_file_content(file_path_canonical, client_name)
-                    if content:
-                        return content
-                except Exception as ce:
-                    last_err = ce
-                    logger.debug(f"Connector {c.__class__.__name__} failed for {file_path_canonical}: {ce}")
+                    logger.info(f"FabricConnector fallback trying {c.__class__.__name__} for {file_path_canonical}")
+                    return c.get_file_content(file_path_canonical, client_name)
+                except Exception:
                     continue
-
-            raise RuntimeError(f"No connector could read file {file_path_canonical}: {last_err}")
+            
+            raise RuntimeError(f"No connector could read file {file_path_canonical}")
         except Exception as e:
             logger.error(f"FabricConnector failed to read artifact {file_path_canonical}: {e}")
             raise RuntimeError(f"FabricConnector failed: {e}")
@@ -788,13 +819,13 @@ def get_mcp_connector(source_type: str) -> MCPSourceConnector:
     Supported: ADLS, API, LOCAL, S3, FABRIC
     """
     src = (source_type or "").upper().strip()
-    if src == "ADLS":
+    if src in ["ADLS", "AZURE", "AZURE_STORAGE", "AZURESTORAGE"]:
         return ADLSConnector()
-    elif src == "API":
+    elif src in ["API", "REST", "REST_API", "HTTP", "RESTAPI"]:
         return APIConnector()
     elif src == "LOCAL":
         return LocalConnector()
-    elif src == "S3":
+    elif src in ["S3", "AWS"]:
         return S3Connector()
     elif src in ["FABRIC", "NEON_STAGED_SOURCE"]:
         return FabricConnector()

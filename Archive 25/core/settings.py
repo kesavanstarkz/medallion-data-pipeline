@@ -41,6 +41,7 @@ class Settings(BaseSettings):
         "https://api.fabric.microsoft.com/Workspace.ReadWrite.All,"
         "https://api.fabric.microsoft.com/Item.ReadWrite.All,"
         "https://api.fabric.microsoft.com/Item.Execute.All,"
+        "https://api.fabric.microsoft.com/Connection.ReadWrite.All,"
         "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All,"
         "https://api.fabric.microsoft.com/DataPipeline.Execute.All"
     )

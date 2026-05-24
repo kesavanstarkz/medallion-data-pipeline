@@ -593,36 +593,145 @@ def save_master_config(request: dict, db: Session = Depends(get_db)):
     
     reformatted = request.get("reformatted_config") or request
     source_meta = reformatted.get("source") or {}
-    # Use artifact_id as dataset_id if possible, otherwise pipeline_name
-    dataset_id = source_meta.get("artifact_id") or reformatted.get("pipeline_name") or "fabric_pipeline"
+    
+    # 1. Accept explicit dataset_id from request payload
+    dataset_id = (
+        request.get("dataset_id")
+        or reformatted.get("dataset_id")
+        or source_meta.get("dataset_id")
+        or source_meta.get("artifact_id")
+        or reformatted.get("pipeline_name")
+        or "fabric_pipeline"
+    )
     
     # Map to Master Config Schema
     from core.master_config_manager import MasterConfigManager, MASTER_CONFIG_COLUMNS
     import pandas as pd
     import numpy as np
     from datetime import datetime
+    from api.discovery import _is_temporary_artifact_name
     
     mgr = MasterConfigManager()
     key = mgr._get_config_key(client_name)
     df = mgr._get_existing_config(key)
     
-    # Ensure source_object is the actual file name
-    source_obj = reformatted.get("source_object") or reformatted.get("file_name") or "source_export.csv"
-    if (reformatted.get("source_type") == "ADLS" and "runtime_pipeline_sources" in (reformatted.get("folder_path") or "")):
-        source_obj = "source_export.csv"
+    # Determine the raw/mapped Fabric source type
+    from services.fabric.deploy_service import SOURCE_TYPE_MAP
+    raw_src_type = source_meta.get("source_type") or source_meta.get("storage_type") or reformatted.get("source_type") or "FABRIC"
+    mapped_src_type = SOURCE_TYPE_MAP.get(raw_src_type) or SOURCE_TYPE_MAP.get(f"{raw_src_type}Source") or raw_src_type
+    mapped_src_type_upper = str(mapped_src_type).upper().strip()
 
-    # Use source_object as part of dataset_id for ADLS promotions to ensure uniqueness and match ad-hoc discovery
-    dataset_id = source_meta.get("artifact_id") or reformatted.get("pipeline_name") or "fabric_pipeline"
-    if reformatted.get("source_type") == "ADLS" and source_obj == "source_export.csv":
-        # Keep original pipeline name as dataset_id but ensure it's not confused with source_object
-        pass
+    # Map to registered APISourceConfig source_type
+    registry_source_type = None
+    if mapped_src_type_upper in ["REST", "API", "REST_API", "HTTP"]:
+        registry_source_type = "API"
+    elif mapped_src_type_upper in ["S3", "AWS"]:
+        registry_source_type = "S3"
+    elif mapped_src_type_upper in ["ADLS", "AZURE"]:
+        registry_source_type = "ADLS"
+    elif mapped_src_type_upper in ["SQL", "AZURESQL", "MSSQL"]:
+        registry_source_type = "SQL"
 
+    registered_source = None
+    if registry_source_type:
+        from models.api_source_config import APISourceConfig
+        from core.utils import generate_dataset_id
+        registered_source = (
+            db.query(APISourceConfig)
+            .filter(
+                APISourceConfig.client_name == client_name,
+                APISourceConfig.source_type == registry_source_type,
+                APISourceConfig.is_active == True
+            )
+            .first()
+        )
+
+    # Resolve target source_type and source_object
+    source_type = str(mapped_src_type).upper().strip() if mapped_src_type else (reformatted.get("source_type") or "FABRIC_RUNTIME")
+    source_obj = reformatted.get("source_object") or reformatted.get("file_name") or ""
+
+    if registered_source:
+        logger.info(
+            f"APISourceConfig Registry Link (Save Master): client={client_name} mapped Fabric connection raw_type='{raw_src_type}' to registered source_type='{registered_source.source_type}', name='{registered_source.source_name}'"
+        )
+        source_type = registered_source.source_type
+        source_obj = registered_source.source_name
+        # Keep path logically pointing to the registered endpoint/source
+        folder_path = registered_source.endpoints or registered_source.base_url or reformatted.get("folder_path") or reformatted.get("source_path") or ""
+        reformatted["folder_path"] = folder_path
+        dataset_id = generate_dataset_id(client_name, source_type, folder_path)
+    
+    # 2. Check for an existing registered source for this client+pipeline
+    pipeline_id = request.get("pipeline_id") or reformatted.get("pipeline_id") or source_meta.get("pipeline_id") or client_name.upper()
+    pipeline_name = reformatted.get("pipeline_name")
+    
+    existing_registered = None
+    if pipeline_id:
+        existing_registered = (
+            db.query(MasterConfigAuthoritative)
+            .filter(
+                MasterConfigAuthoritative.client_name == client_name,
+                MasterConfigAuthoritative.pipeline_id == pipeline_id,
+                MasterConfigAuthoritative.is_active == True,
+            )
+            .first()
+        )
+    if not existing_registered and pipeline_name:
+        existing_registered = (
+            db.query(MasterConfigAuthoritative)
+            .filter(
+                MasterConfigAuthoritative.client_name == client_name,
+                MasterConfigAuthoritative.pipeline_id == pipeline_name,
+                MasterConfigAuthoritative.is_active == True,
+            )
+            .first()
+        )
+    if not existing_registered and dataset_id:
+        existing_registered = (
+            db.query(MasterConfigAuthoritative)
+            .filter(
+                MasterConfigAuthoritative.client_name == client_name,
+                MasterConfigAuthoritative.dataset_id == dataset_id,
+                MasterConfigAuthoritative.is_active == True,
+            )
+            .first()
+        )
+        
+    if existing_registered:
+        # If the existing record has a non-FABRIC source type (i.e., it was
+        # explicitly registered by the user as REST, SQL, ADLS, etc.),
+        # do NOT overwrite it with a generic FABRIC/FABRIC_RUNTIME type.
+        registered_src_type = (existing_registered.source_type or "").upper()
+        if registered_src_type and registered_src_type not in ("FABRIC", "FABRIC_RUNTIME", ""):
+            if source_type in ("FABRIC", "FABRIC_RUNTIME"):
+                logger.info(
+                    f"Preserving registered source_type '{registered_src_type}' over runtime '{source_type}' for pipeline {pipeline_id}"
+                )
+                source_type = registered_src_type
+                
+        # If the existing record has a real source_object and the runtime
+        # is trying to set it to a temporary artifact name or empty, preserve the original.
+        registered_src_obj = (existing_registered.source_object or "").strip()
+        if registered_src_obj and (not source_obj or _is_temporary_artifact_name(source_obj)):
+            logger.info(
+                f"Preserving registered source_object '{registered_src_obj}' over temporary/missing artifact '{source_obj}'"
+            )
+            source_obj = registered_src_obj
+            
+        # Use the existing dataset_id to update in-place rather than creating a duplicate.
+        dataset_id = existing_registered.dataset_id
+        
+    # 3. Sanitize temporary artifact names if we don't have registered metadata
+    if _is_temporary_artifact_name(source_obj):
+        logger.warning(f"Blocked temporary artifact name '{source_obj}' from becoming source_object; clearing to empty.")
+        source_obj = ""
+        
     # Construct a row
     new_row = {
         "dataset_id": dataset_id,
-        "pipeline_id": client_name.upper(),
+        "pipeline_id": pipeline_id,
         "client_name": client_name,
-        "source_type": reformatted.get("source_type") or "FABRIC_RUNTIME",
+        "source_type": source_type,
         "source_folder": reformatted.get("folder_path") or reformatted.get("source_path") or "",
         "source_object": source_obj,
         "file_format": (reformatted.get("file_types") or ["CSV"])[0],

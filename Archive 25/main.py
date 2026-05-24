@@ -177,7 +177,7 @@ try:
     with engine.connect() as conn:
         add_column_if_missing(conn, "master_config_authoritative", "raw_layer_path", "raw_layer_path TEXT")
         add_column_if_missing(conn, "master_config_authoritative", "schema", "schema TEXT")
-        add_column_if_missing(conn, "master_config", "schema", "schema TEXT")
+        add_column_if_missing(conn, "master_configuration", "schema", "schema TEXT")
 
         # API Source Config Multi-Cloud Migrations
         add_column_if_missing(conn, "api_source_config", "source_type", "source_type TEXT DEFAULT 'API'")

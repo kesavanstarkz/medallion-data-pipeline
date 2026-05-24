@@ -822,9 +822,37 @@ export default function OrchestrationStepper({ hideHeader = false }) {
         setDqError(null);
         setIsSuggesting(false); // Reset this for standard loads
         try {
-            const res = await call(`/dq/config/${datasetId}`);
-            setEditingConfigColumns(res.columns || []);
+            const res = await call(
+                `/dq/config/${encodeURIComponent(datasetId)}?client_name=${encodeURIComponent(selectedClient || "")}`,
+            );
+            let columns = res.columns || [];
+            if (!columns.length) {
+                try {
+                    const discovered = await call(
+                        `/dq/columns/${encodeURIComponent(datasetId)}?client_name=${encodeURIComponent(selectedClient || "")}`,
+                    );
+                    const discoveredCols = discovered?.columns || [];
+                    columns = discoveredCols.map((c) => ({
+                        column_name: c.name || c.column_name,
+                        expected_data_type: String(
+                            c.inferred_type || c.data_type || "STRING",
+                        ).toUpperCase(),
+                        dq_rules: [],
+                        rule_value: null,
+                        severity: "ERROR",
+                        is_active: false,
+                    }));
+                } catch (discoverErr) {
+                    console.warn("DQ column discovery fallback failed:", discoverErr);
+                }
+            }
+            setEditingConfigColumns(columns);
             setShowDQPanel(true);
+            if (!columns.length) {
+                setDqError(
+                    "No columns found. Run Preview Data or Save Source in Pipeline Intelligence first.",
+                );
+            }
         } catch (e) {
             const msg = e?.message || "Failed to load configuration";
             setDqError(msg);

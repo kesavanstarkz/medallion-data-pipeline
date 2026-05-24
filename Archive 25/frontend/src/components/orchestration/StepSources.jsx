@@ -124,12 +124,22 @@ export default function StepSources({
       setSelectedApiSource("adls-path");
     } else if (primary.type === "FABRIC") {
       setSourceType("FABRIC");
-      const name = primary.data?.manifest_json?.name || "Fabric Pipeline";
-      setFolderPath(name);
-      setSelectedEndpoint(name);
+      const cfg =
+        intelligenceData?.reformatted_config ||
+        primary.data?.reformatted_config ||
+        {};
+      const datasetId = cfg.dataset_id || primary.data?.dataset_id || "";
+      const sourcePath =
+        cfg.source_path ||
+        cfg.raw_layer_path ||
+        primary.data?.source_path ||
+        "";
+      const resolved = datasetId || sourcePath;
+      setFolderPath(resolved);
+      setSelectedEndpoint(resolved);
       setSelectedApiSource("fabric-extracted");
     }
-  }, [selectedSources, setSelectedSources, setSourceType, setFolderPath, setSelectedEndpoint, setSelectedApiSource]);
+  }, [selectedSources, setSelectedSources, setSourceType, setFolderPath, setSelectedEndpoint, setSelectedApiSource, intelligenceData]);
 
   async function fetchLocalFiles(client) {
     setLocalFilesLoading(true);

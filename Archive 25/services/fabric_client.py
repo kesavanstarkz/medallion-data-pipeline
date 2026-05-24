@@ -61,9 +61,10 @@ class InteractiveAuth:
 
         self._flask_app.run(port=5000, use_reloader=False, threaded=True)
 
-    def _launch_browser_flow(self) -> None:
+    def _launch_browser_flow(self, scopes: Optional[list] = None) -> None:
+        scopes = scopes or FABRIC_SCOPE
         auth_url = self._app.get_authorization_request_url(
-            scopes=FABRIC_SCOPE,
+            scopes=scopes,
             redirect_uri=REDIRECT_URI,
         )
         t = threading.Thread(target=self._start_flask, daemon=True)
@@ -74,18 +75,19 @@ class InteractiveAuth:
         if not self._auth_code:
             raise FabricAuthError("Timed out waiting for browser login.")
 
-    def get_token(self) -> str:
+    def get_token(self, scopes: Optional[list] = None) -> str:
+        scopes = scopes or FABRIC_SCOPE
         accounts = self._app.get_accounts()
         if accounts:
-            result = self._app.acquire_token_silent(FABRIC_SCOPE, account=accounts[0])
+            result = self._app.acquire_token_silent(scopes, account=accounts[0])
             if result and "access_token" in result:
                 return result["access_token"]
 
-        self._launch_browser_flow()
+        self._launch_browser_flow(scopes=scopes)
 
         result = self._app.acquire_token_by_authorization_code(
             code=self._auth_code,
-            scopes=FABRIC_SCOPE,
+            scopes=scopes,
             redirect_uri=REDIRECT_URI,
         )
         if "access_token" not in result:
@@ -94,12 +96,15 @@ class InteractiveAuth:
             raise FabricAuthError(f"Token exchange failed [{error}]: {desc}")
         return result["access_token"]
 
-    @property
-    def headers(self) -> dict:
+    def get_headers(self, scopes: Optional[list] = None) -> dict:
         return {
-            "Authorization": f"Bearer {self.get_token()}",
+            "Authorization": f"Bearer {self.get_token(scopes=scopes)}",
             "Content-Type": "application/json",
         }
+
+    @property
+    def headers(self) -> dict:
+        return self.get_headers()
 
 
 class FabricClient:
@@ -107,16 +112,49 @@ class FabricClient:
         self.auth = auth or InteractiveAuth()
         self._session = requests.Session()
 
-    def _request(self, method: str, url: str, **kwargs) -> requests.Response:
+    def _request(self, method: str, url: str, use_delegated: bool = False, **kwargs) -> requests.Response:
+        import time
+        max_attempts = 5
         kwargs.setdefault("timeout", 60)
-        headers = self.auth.headers
-        print(f">>> {method} {url}", flush=True)
-        resp = self._session.request(method, url, headers=headers, **kwargs)
-        print(f"<<< {resp.status_code} {url}", flush=True)
-        if not resp.ok:
+        scopes = None
+        if use_delegated:
+            scopes = [
+                "https://api.fabric.microsoft.com/Connection.ReadWrite.All",
+                "https://api.fabric.microsoft.com/Item.ReadWrite.All",
+                "https://api.fabric.microsoft.com/DataPipeline.ReadWrite.All"
+            ]
+            
+        for attempt in range(max_attempts):
+            headers = self.auth.get_headers(scopes=scopes)
+            print(f">>> {method} {url} (attempt {attempt + 1}/{max_attempts})", flush=True)
+            resp = self._session.request(method, url, headers=headers, **kwargs)
+            print(f"<<< {resp.status_code} {url}", flush=True)
+            
+            if resp.ok:
+                return resp
+                
             print(f"    ERROR BODY: {resp.text}", flush=True)
+            
+            is_cicd_in_progress = False
+            try:
+                err_data = resp.json()
+                if isinstance(err_data, dict):
+                    err_code = err_data.get("errorCode")
+                    if not err_code and isinstance(err_data.get("error"), dict):
+                        err_code = err_data["error"].get("code") or err_data["error"].get("errorCode")
+                    if err_code == "ActiveCiCdOperationInProgress":
+                        is_cicd_in_progress = True
+            except Exception:
+                pass
+                
+            if is_cicd_in_progress:
+                if attempt < max_attempts - 1:
+                    backoff = 2 * (2 ** attempt)  # 2s, 4s, 8s, 16s, 32s
+                    print(f"ActiveCiCdOperationInProgress encountered. Retrying in {backoff} seconds...", flush=True)
+                    time.sleep(backoff)
+                    continue
+                    
             raise FabricAPIError(resp.status_code, resp.text)
-        return resp
 
     # ---------------------------------------------------------------- pipelines
 
@@ -151,6 +189,7 @@ class FabricClient:
         base_url: str,
         privacy_level: str = "Organizational",
         skip_test: bool = True,
+        use_delegated: bool = True,
     ) -> dict:
         """
         Create a real Fabric ShareableCloud REST (Web) connection.
@@ -162,9 +201,25 @@ class FabricClient:
 
         Returns the full connection object including the UUID `id` field.
 
+        If a connection with the same displayName already exists, returns
+        the existing connection instead of creating a duplicate.
+
         Requires the delegated scope: Connection.ReadWrite.All
         The signed-in user must consent to this scope on first run.
         """
+        list_url = f"{BASE}/connections"
+
+        # --- Deduplication: check if a connection with this displayName already exists ---
+        try:
+            list_resp = self._request("GET", list_url, use_delegated=use_delegated)
+            for conn in list_resp.json().get("value", []):
+                if conn.get("displayName") == display_name:
+                    print(f"Connection with displayName '{display_name}' already exists (id={conn.get('id')}). Reusing.", flush=True)
+                    return conn
+        except Exception as e:
+            print(f"Warning: Failed to list existing connections for dedup check: {e}", flush=True)
+
+        # --- No match found: create new connection ---
         url = f"{BASE}/connections"
         body = {
             "connectivityType": "ShareableCloud",
@@ -190,5 +245,5 @@ class FabricClient:
                 },
             },
         }
-        resp = self._request("POST", url, json=body)
+        resp = self._request("POST", url, json=body, use_delegated=use_delegated)
         return resp.json()
