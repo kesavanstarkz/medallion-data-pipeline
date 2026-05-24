@@ -6,6 +6,7 @@ import io
 import copy
 import logging
 import os
+import asyncio
 from fastapi import HTTPException
 
 from services.fabric.entity_resolver import log_export_context
@@ -57,6 +58,49 @@ class FabricDeployService:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
+
+    async def _get_pipeline_definition(self, workspace_id: str, pipeline_id: str):
+        from services.fabric.auth_service import execute_fabric_request
+
+        urls = [
+            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/items/{pipeline_id}/getDefinition",
+            f"{FABRIC_API_BASE}/workspaces/{workspace_id}/dataPipelines/{pipeline_id}/getDefinition",
+        ]
+
+        last_resp = None
+        for url in urls:
+            resp = await execute_fabric_request(self, "POST", url)
+            last_resp = resp
+            if resp.status_code in (200, 201, 202):
+                break
+
+        if not last_resp:
+            raise HTTPException(status_code=500, detail="Failed to fetch pipeline definition: no response received.")
+
+        if last_resp.status_code == 202:
+            location = last_resp.headers.get("Location")
+            if not location:
+                raise HTTPException(status_code=502, detail="getDefinition returned 202 Accepted but no Location header.")
+            while True:
+                poll_resp = await execute_fabric_request(self, "GET", location)
+                if poll_resp.status_code == 200:
+                    raw_def = poll_resp.json()
+                    break
+                if poll_resp.status_code in (202, 204):
+                    await asyncio.sleep(2)
+                    continue
+                raise HTTPException(status_code=poll_resp.status_code, detail=f"Failed to poll definition: {poll_resp.text}")
+        elif last_resp.status_code in (200, 201):
+            raw_def = last_resp.json()
+        else:
+            raise HTTPException(status_code=last_resp.status_code, detail=f"Failed to get pipeline definition: {last_resp.text}")
+
+        parts = raw_def.get("definition", {}).get("parts", []) or raw_def.get("parts", [])
+        for part in parts:
+            if part.get("path") == "pipeline-content.json":
+                decoded = base64.b64decode(part["payload"]).decode("utf-8")
+                return raw_def, json.loads(decoded)
+        raise HTTPException(status_code=400, detail="pipeline-content.json not found in definition")
 
     async def deploy_pipeline(self, workspace_id: str, file_bytes: bytes):
         """Automated ZIP-based deployment: Dynamically detects content and deploys"""
@@ -143,10 +187,7 @@ class FabricDeployService:
         workspace_name: str | None = None,
         pipeline_name: str | None = None,
     ):
-        """Clones a pipeline by exporting and then re-importing it with a new name"""
-        from services.fabric.pipeline_service import FabricPipelineService
-        p_service = FabricPipelineService(self.headers["Authorization"].replace("Bearer ", ""))
-
+        """Clones a pipeline from its live definition with a new name."""
         log_export_context(
             workspace_id=source_workspace_id,
             pipeline_item_id=source_pipeline_id,
@@ -154,17 +195,11 @@ class FabricDeployService:
             pipeline_name=pipeline_name or "",
             operation="clone_pipeline",
         )
-        # 1. Export
-        results = await p_service.bulk_export_definitions(source_workspace_id, [source_pipeline_id])
-        if source_pipeline_id not in results:
-            raise HTTPException(status_code=404, detail="Source pipeline not found or export failed")
-        
-        files = results[source_pipeline_id]
-        pipeline_json = files.get("pipeline.json")
-        if not pipeline_json:
-            raise HTTPException(status_code=400, detail="Pipeline content missing in export")
-        
-        definition_dict = json.loads(pipeline_json.decode('utf-8'))
+
+        _, definition_dict = await self._get_pipeline_definition(
+            source_workspace_id,
+            source_pipeline_id,
+        )
         definition_b64 = base64.b64encode(json.dumps(definition_dict).encode('utf-8')).decode('utf-8')
         
         # 2. Check for name collisions in Target and resolve versioning
@@ -248,9 +283,6 @@ class FabricDeployService:
         pipeline_name: str | None = None,
     ):
         """Clone a pipeline with source/sink mutation, matching pipe_chg_src MutationEngine.clone."""
-        from services.fabric.pipeline_service import FabricPipelineService
-        p_service = FabricPipelineService(self.headers["Authorization"].replace("Bearer ", ""))
-
         log_export_context(
             workspace_id=workspace_id,
             pipeline_item_id=pipeline_id,
@@ -258,15 +290,8 @@ class FabricDeployService:
             pipeline_name=pipeline_name or "",
             operation=f"mutate_pipeline_{mode}",
         )
-        results = await p_service.bulk_export_definitions(workspace_id, [pipeline_id])
-        if pipeline_id not in results:
-            raise HTTPException(status_code=404, detail="Source pipeline not found or export failed")
 
-        pipeline_json = results[pipeline_id].get("pipeline.json")
-        if not pipeline_json:
-            raise HTTPException(status_code=400, detail="Pipeline content missing in export")
-
-        content = json.loads(pipeline_json.decode("utf-8"))
+        _, content = await self._get_pipeline_definition(workspace_id, pipeline_id)
         logger.debug("Loaded exported pipeline content for mutation: workspace=%s pipeline=%s", workspace_id, pipeline_id)
         idx, original_activity = self._get_copy_activity_with_index(content)
         logger.debug("Original copy activity name=%s id=%s", original_activity.get("name"), original_activity.get("type"))
@@ -277,7 +302,8 @@ class FabricDeployService:
             if not source_params:
                 raise HTTPException(status_code=400, detail="source_params required")
             source_type = source_params.get("connector_type") or self._detect_connector_type(original_activity, "source")
-            if source_type == "REST":
+            source_type_upper = str(source_type or "").upper()
+            if source_type_upper in ("REST", "REST_API"):
                 connection_id = await self._resolve_rest_connection_id(
                     workspace_id,
                     source_params,
@@ -337,11 +363,8 @@ class FabricDeployService:
             except Exception:
                 logger.debug("Failed logging exported activities")
 
-            # If the caller explicitly selected a sink type, validate it matches the actual pipeline sink
-            if selected_sink_type and selected_sink_type.upper() != detected_sink_type.upper():
-                raise HTTPException(status_code=400, detail=f"Selected sink type {selected_sink_type} does not match actual pipeline sink type {detected_sink_type}")
-
-            if sink_type == "REST":
+            sink_type_upper = str(sink_type or "").upper()
+            if sink_type_upper in ("REST", "REST_API"):
                 # For sink mutations we require an existing REST connection on the referenced/template pipeline
                 connection_id = await self._resolve_rest_connection_id(
                     workspace_id,
@@ -581,16 +604,13 @@ class FabricDeployService:
         }
 
     async def _extract_rest_connection_id(self, workspace_id: str, pipeline_id: str, preferred_role: str) -> str | None:
-        # Inspect the exported definition directly so no connection-list permission is needed.
-        from services.fabric.pipeline_service import FabricPipelineService
-
-        token = self.headers["Authorization"].replace("Bearer ", "")
-        service = FabricPipelineService(token)
-        results = await service.bulk_export_definitions(workspace_id, [pipeline_id])
-        pipeline_json = results.get(pipeline_id, {}).get("pipeline.json")
-        if not pipeline_json:
+        # Inspect the live definition directly so no connection-list permission or bulk export is needed.
+        try:
+            _, definition = await self._get_pipeline_definition(workspace_id, pipeline_id)
+        except Exception as exc:
+            logger.debug("Failed to inspect REST connection from pipeline %s: %s", pipeline_id, exc)
             return None
-        definition = json.loads(pipeline_json.decode("utf-8"))
+
         refs = []
         for activity in definition.get("properties", {}).get("activities", []):
             type_props = activity.get("typeProperties", {})

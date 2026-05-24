@@ -54,13 +54,13 @@ const STRATEGIES = [
         id: "MODIFY_SOURCE",
         label: "Modify Source",
         icon: <FiEdit2 />,
-        desc: "Replace the pipeline source connector and configuration.",
+        desc: "Create a new pipeline with a replaced source connector.",
     },
     {
         id: "MODIFY_SINK",
         label: "Modify Sink",
         icon: <FiRefreshCw />,
-        desc: "Replace the pipeline sink connector and configuration.",
+        desc: "Create a new pipeline with a replaced sink connector.",
     },
     {
         id: "CREATE_NEW",
@@ -69,6 +69,9 @@ const STRATEGIES = [
         desc: "Deploy a completely new pipeline item from an external package.",
     },
 ];
+
+const VALID_STRATEGY_IDS = new Set(STRATEGIES.map((strategy) => strategy.id));
+const LEGACY_REPLACE_SOURCE_STRATEGY = "REPLACE_SOURCE_PIPELINE";
 
 const TARGETS = [
     {
@@ -551,10 +554,31 @@ export default function PipelineIntelligence({
     }, [allowedTargets, target]);
 
     useEffect(() => {
-        if (selectedDeploymentStrategy && selectedDeploymentStrategy !== deploymentStrategy) {
-            setDeploymentStrategyState(selectedDeploymentStrategy);
+        const normalizedSelectedStrategy =
+            selectedDeploymentStrategy === LEGACY_REPLACE_SOURCE_STRATEGY
+                ? "MODIFY_SOURCE"
+                : selectedDeploymentStrategy;
+        if (
+            normalizedSelectedStrategy &&
+            normalizedSelectedStrategy !== deploymentStrategy
+        ) {
+            setDeploymentStrategyState(normalizedSelectedStrategy);
         }
     }, [selectedDeploymentStrategy, deploymentStrategy]);
+
+    useEffect(() => {
+        if (!deploymentStrategy) return;
+        if (deploymentStrategy === LEGACY_REPLACE_SOURCE_STRATEGY) {
+            setDeploymentStrategyState("MODIFY_SOURCE");
+            setSelectedDeploymentStrategy("MODIFY_SOURCE");
+            return;
+        }
+        if (VALID_STRATEGY_IDS.has(deploymentStrategy)) {
+            return;
+        }
+        setDeploymentStrategyState(null);
+        setSelectedDeploymentStrategy(null);
+    }, [deploymentStrategy, setSelectedDeploymentStrategy]);
 
     useEffect(() => {
         runtimeCaptureRequestRef.current += 1;

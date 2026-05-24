@@ -3,6 +3,7 @@ import json
 import logging
 import copy
 import asyncio
+import base64
 from typing import Dict, Any, Tuple, Optional
 from fastapi import HTTPException
 

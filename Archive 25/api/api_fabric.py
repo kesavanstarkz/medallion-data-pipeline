@@ -168,17 +168,12 @@ async def inspect(payload: Dict[str, Any] = Body(...), authorization: Optional[s
         operation="inspect",
     )
 
-    p_service = FabricPipelineService(token)
+    service = FabricMutationService(token)
     req_id = str(uuid.uuid4())
-    
+
     async with workspace_lock("inspect", req_id, workspace_id):
-        exported = await p_service.bulk_export_definitions(workspace_id, [pipeline_id])
-    
-    files = exported.get(pipeline_id, {})
-    pipeline_json = files.get("pipeline.json")
-    if not pipeline_json:
-        raise HTTPException(status_code=404, detail="Pipeline definition not found")
-    definition = json.loads(pipeline_json.decode("utf-8"))
+        _, definition = await service._get_pipeline_definition(workspace_id, pipeline_id)
+
     activities = definition.get("properties", {}).get("activities", [])
     copy_activities = [activity for activity in activities if activity.get("type") == "Copy"]
 
@@ -189,6 +184,8 @@ async def inspect(payload: Dict[str, Any] = Body(...), authorization: Optional[s
     activities_info = []
     detected_source_types = set()
     detected_sink_types = set()
+    source_connection_id = None
+    sink_connection_id = None
     for activity in activities:
         info = {"name": activity.get("name"), "type": activity.get("type"), "roles": {}}
         type_props = activity.get("typeProperties") or {}
@@ -207,6 +204,10 @@ async def inspect(payload: Dict[str, Any] = Body(...), authorization: Optional[s
                 "linkedServiceReference": ((ds_settings.get("linkedServiceName") or {}).get("referenceName") if isinstance(ds_settings, dict) else None),
             }
             if connection:
+                if role == "source" and not source_connection_id:
+                    source_connection_id = connection
+                if role == "sink" and not sink_connection_id:
+                    sink_connection_id = connection
                 connections.append({
                     "activity": activity.get("name"),
                     "role": role,
@@ -226,6 +227,8 @@ async def inspect(payload: Dict[str, Any] = Body(...), authorization: Optional[s
         "copy_activity_count": len(copy_activities),
         "connections_found": len(connections),
         "connections": connections,
+        "source_connection_id": source_connection_id,
+        "sink_connection_id": sink_connection_id,
         "detected_source_types": list(detected_source_types),
         "detected_sink_types": list(detected_sink_types),
         "activities": activities_info,
@@ -324,7 +327,19 @@ def handle_mutation_exception(exc: Exception):
         raise HTTPException(status_code=400, detail=err_str)
 
 
-@router.post("/inspect")
+def _modified_pipeline_name(payload: Dict[str, Any], ctx: Dict[str, Any], suffix: str) -> str:
+    requested = str(payload.get("clone_name") or "").strip()
+    if requested:
+        return requested
+    base = (
+        str(ctx.get("pipeline_name") or "").strip()
+        or str(payload.get("pipeline_name") or "").strip()
+        or str(ctx.get("pipeline_item_id") or ctx.get("pipeline_id") or "pipeline")
+    )
+    return f"{base}_{suffix}"
+
+
+@router.post("/inspect-basic")
 async def inspect_pipeline(payload: Dict[str, Any] = Body(...), authorization: Optional[str] = Header(None)):
     token = get_token(authorization)
     ctx = await _resolve_ids_from_payload(token, payload)
@@ -354,26 +369,31 @@ async def modify_source(payload: Dict[str, Any] = Body(...), authorization: Opti
     if not source_type or source_params is None:
         raise HTTPException(status_code=400, detail="source_type and source_params are required.")
         
+    source_params = dict(source_params or {})
+    source_params.setdefault("connector_type", source_type)
+
     log_export_context(
         workspace_id=workspace_id,
         pipeline_item_id=pipeline_id,
         workspace_name=ctx.get("workspace_name", ""),
         pipeline_name=ctx.get("pipeline_name", ""),
-        operation="modify-source-inplace",
+        operation="modify-source-clone",
     )
     
     req_id = str(uuid.uuid4())
     async with workspace_lock("modify-source", req_id, workspace_id):
         try:
-            service = FabricMutationService(token)
-            return await service.modify_source(
-                workspace_id,
-                pipeline_id,
-                source_type,
-                source_params,
-                token,
-                connection_name=payload.get("source_connection_name"),
+            service = FabricDeployService(token)
+            return await service.mutate_pipeline(
+                workspace_id=workspace_id,
+                pipeline_id=pipeline_id,
+                new_name=_modified_pipeline_name(payload, ctx, "source_modified"),
+                mode="source",
+                source_params=source_params,
+                source_connection_name=payload.get("source_connection_name"),
                 template_pipeline_id=payload.get("template_pipeline_id"),
+                workspace_name=ctx.get("workspace_name", ""),
+                pipeline_name=ctx.get("pipeline_name", ""),
             )
         except Exception as exc:
             handle_mutation_exception(exc)
@@ -392,26 +412,31 @@ async def modify_sink(payload: Dict[str, Any] = Body(...), authorization: Option
     if not sink_type or sink_params is None:
         raise HTTPException(status_code=400, detail="sink_type and sink_params are required.")
         
+    sink_params = dict(sink_params or {})
+    sink_params.setdefault("connector_type", sink_type)
+
     log_export_context(
         workspace_id=workspace_id,
         pipeline_item_id=pipeline_id,
         workspace_name=ctx.get("workspace_name", ""),
         pipeline_name=ctx.get("pipeline_name", ""),
-        operation="modify-sink-inplace",
+        operation="modify-sink-clone",
     )
     
     req_id = str(uuid.uuid4())
     async with workspace_lock("modify-sink", req_id, workspace_id):
         try:
-            service = FabricMutationService(token)
-            return await service.modify_sink(
-                workspace_id,
-                pipeline_id,
-                sink_type,
-                sink_params,
-                token,
-                connection_name=payload.get("sink_connection_name"),
+            service = FabricDeployService(token)
+            return await service.mutate_pipeline(
+                workspace_id=workspace_id,
+                pipeline_id=pipeline_id,
+                new_name=_modified_pipeline_name(payload, ctx, "sink_modified"),
+                mode="sink",
+                sink_params=sink_params,
+                sink_connection_name=payload.get("sink_connection_name"),
                 template_pipeline_id=payload.get("template_pipeline_id"),
+                workspace_name=ctx.get("workspace_name", ""),
+                pipeline_name=ctx.get("pipeline_name", ""),
             )
         except Exception as exc:
             handle_mutation_exception(exc)

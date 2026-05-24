@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
     FiAlertCircle,
     FiCheck,
@@ -25,6 +25,8 @@ const CONNECTOR_TYPES = [
     "JSON",
     "Parquet",
 ];
+
+const REPLACE_SOURCE_STRATEGY = "REPLACE_SOURCE_PIPELINE";
 
 function defaultParams(strategy) {
     if (strategy === "MODIFY_SINK") {
@@ -68,6 +70,7 @@ export default function StepDeployment({
     const [sourceConnectionName, setSourceConnectionName] = useState("");
     const [sinkConnectionName, setSinkConnectionName] = useState("");
     const [templatePipelineId, setTemplatePipelineId] = useState("");
+    const inspectRequestKeyRef = useRef("");
 
     const workspaceId =
         selectedWorkspace?.workspace_id || selectedWorkspace?.id || "";
@@ -83,6 +86,23 @@ export default function StepDeployment({
         selectedPipeline?.name ||
         selectedPipeline?.displayName ||
         "";
+    const isLegacySourceReplacement =
+        deploymentStrategy === REPLACE_SOURCE_STRATEGY;
+    const isSourceReplacement =
+        isLegacySourceReplacement || deploymentStrategy === "MODIFY_SOURCE";
+    const isSinkModification = deploymentStrategy === "MODIFY_SINK";
+    const strategyLabel =
+        isLegacySourceReplacement
+            ? "Replace Source Pipeline"
+            : deploymentStrategy?.replace(/_/g, " ");
+    const sourceActionLabel = isLegacySourceReplacement
+        ? "Replace Source Pipeline"
+        : "Modify Source";
+    const packageIncludes = Array.isArray(
+        deploymentPackage?.manifest?.includes,
+    )
+        ? deploymentPackage.manifest.includes
+        : [];
 
     useEffect(() => {
         setStatus("idle");
@@ -95,11 +115,19 @@ export default function StepDeployment({
     // Auto-inspect selected pipeline to prefill connector types and params
     useEffect(() => {
         const shouldInspect =
-            (deploymentStrategy === "MODIFY_SOURCE" ||
-                deploymentStrategy === "MODIFY_SINK") &&
+            (isSourceReplacement || isSinkModification) &&
             !!pipelineItemId &&
-            !!workspaceId;
+            !!workspaceId &&
+            status !== "deploying";
         if (!shouldInspect) return;
+        const requestKey = [
+            deploymentStrategy,
+            workspaceId,
+            pipelineItemId,
+            fabricAccessToken || "",
+        ].join("|");
+        if (inspectRequestKeyRef.current === requestKey) return;
+        inspectRequestKeyRef.current = requestKey;
         let mounted = true;
         (async () => {
             try {
@@ -131,8 +159,7 @@ export default function StepDeployment({
                 if (!resp.ok) return; // keep defaults
                 const body = await resp.json();
                 if (!mounted) return;
-                const role =
-                    deploymentStrategy === "MODIFY_SOURCE" ? "source" : "sink";
+                const role = isSourceReplacement ? "source" : "sink";
                 const detectedList =
                     role === "source"
                         ? body.detected_source_types
@@ -164,7 +191,7 @@ export default function StepDeployment({
                     roleFromInspect.raw_type ||
                     "";
                 if (detected) {
-                    if (deploymentStrategy === "MODIFY_SOURCE") {
+                    if (isSourceReplacement) {
                         setSourceType(detected);
                     } else {
                         setSinkType(detected);
@@ -210,7 +237,7 @@ export default function StepDeployment({
                 // Only set the params text if we created some guessed keys
                 if (Object.keys(guessed).length > 0) {
                     const text = JSON.stringify(guessed, null, 2);
-                    if (deploymentStrategy === "MODIFY_SOURCE")
+                    if (isSourceReplacement)
                         setSourceParamsText(text);
                     else setSinkParamsText(text);
                 }
@@ -222,7 +249,15 @@ export default function StepDeployment({
         return () => {
             mounted = false;
         };
-    }, [deploymentStrategy, pipelineItemId, workspaceId]);
+    }, [
+        deploymentStrategy,
+        fabricAccessToken,
+        isSinkModification,
+        isSourceReplacement,
+        pipelineItemId,
+        status,
+        workspaceId,
+    ]);
 
     const addLog = (msg) =>
         setLogs((prev) => [
@@ -262,7 +297,7 @@ export default function StepDeployment({
         setStatus("deploying");
         setError(null);
         setLogs([]);
-        addLog(`Starting ${deploymentStrategy} deployment...`);
+        addLog(`Starting ${strategyLabel}...`);
 
         try {
             // Ensure we have a usable Fabric token. If `fabricAccessToken` isn't provided
@@ -327,7 +362,7 @@ export default function StepDeployment({
                         pipeline_name: pipelineName,
                     }),
                 });
-            } else if (deploymentStrategy === "MODIFY_SOURCE") {
+            } else if (isSourceReplacement) {
                 response = await fetch(apiUrl("/fabric/modify-source"), {
                     method: "POST",
                     headers: authHeaders(true, tokenToUse),
@@ -349,7 +384,7 @@ export default function StepDeployment({
                             templatePipelineId || pipelineItemId || null,
                     }),
                 });
-            } else if (deploymentStrategy === "MODIFY_SINK") {
+            } else if (isSinkModification) {
                 response = await fetch(apiUrl("/fabric/modify-sink"), {
                     method: "POST",
                     headers: authHeaders(true, tokenToUse),
@@ -394,11 +429,13 @@ export default function StepDeployment({
                 cloneName;
             addLog(`Deployment successful: ${deployedName}`);
             addLog(`Pipeline ID: ${deployedId}`);
-            setDeploymentPackage?.({
-                ...deploymentPackage,
-                deployedId,
-                deployedName,
-            });
+            if (deploymentPackage) {
+                setDeploymentPackage?.({
+                    ...deploymentPackage,
+                    deployedId,
+                    deployedName,
+                });
+            }
             setStatus("success");
         } catch (e) {
             setError(e.message || "Deployment failed.");
@@ -475,7 +512,7 @@ export default function StepDeployment({
                     <div className="context-item">
                         <span className="context-label">Strategy</span>
                         <span className="context-value">
-                            {deploymentStrategy?.replace(/_/g, " ")}
+                            {strategyLabel}
                         </span>
                     </div>
                 </div>
@@ -574,19 +611,17 @@ export default function StepDeployment({
                                     flexWrap: "wrap",
                                 }}
                             >
-                                {deploymentPackage.manifest.includes.map(
-                                    (item) => (
-                                        <span
-                                            key={item}
-                                            style={{
-                                                fontSize: 11,
-                                                color: "#64748b",
-                                            }}
-                                        >
-                                            <FiFileText /> {item}
-                                        </span>
-                                    ),
-                                )}
+                                {packageIncludes.map((item) => (
+                                    <span
+                                        key={item}
+                                        style={{
+                                            fontSize: 11,
+                                            color: "#64748b",
+                                        }}
+                                    >
+                                        <FiFileText /> {item}
+                                    </span>
+                                ))}
                             </div>
                         </div>
                     )}
@@ -636,8 +671,7 @@ export default function StepDeployment({
                 </div>
             )}
 
-            {(deploymentStrategy === "MODIFY_SOURCE" ||
-                deploymentStrategy === "MODIFY_SINK") && (
+            {(isSourceReplacement || isSinkModification) && (
                 <div
                     className="strategy-section pi-card pi-wide"
                     style={{ padding: 24 }}
@@ -652,17 +686,17 @@ export default function StepDeployment({
                         }}
                     >
                         <FiEdit2 color="#2563eb" />{" "}
-                        {deploymentStrategy === "MODIFY_SOURCE"
-                            ? "Modify Source"
-                            : "Modify Sink"}
+                        {isSourceReplacement ? sourceActionLabel : "Modify Sink"}
                     </h3>
                     <p style={{ fontSize: 13, color: "#64748b" }}>
-                        Mirrors the working `pipe_chg_src` clone command: clone
-                        name, mode, connector type, params JSON, optional
-                        connection name, optional template pipeline ID.
+                        {isSourceReplacement
+                            ? "Creates a new pipeline from the selected pipeline with the source connector replaced. It uses the existing source connection when one is detected; otherwise provide connector parameters below."
+                            : "Creates a new pipeline from the selected pipeline with the sink connector replaced. It uses the existing sink connection when one is detected; otherwise provide connector parameters below."}
                     </p>
                     <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
-                        <label className="context-label">Clone Name</label>
+                        <label className="context-label">
+                            New Pipeline Name
+                        </label>
                         <input
                             className="orch-input"
                             value={cloneName}
@@ -670,19 +704,19 @@ export default function StepDeployment({
                         />
 
                         <label className="context-label">
-                            {deploymentStrategy === "MODIFY_SOURCE"
+                            {isSourceReplacement
                                 ? "Source Type"
                                 : "Sink Type"}
                         </label>
                         <select
                             className="orch-input"
                             value={
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? sourceType
                                     : sinkType
                             }
                             onChange={(e) =>
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? setSourceType(e.target.value)
                                     : setSinkType(e.target.value)
                             }
@@ -695,7 +729,7 @@ export default function StepDeployment({
                         </select>
 
                         <label className="context-label">
-                            {deploymentStrategy === "MODIFY_SOURCE"
+                            {isSourceReplacement
                                 ? "Source Params JSON"
                                 : "Sink Params JSON"}
                         </label>
@@ -707,31 +741,31 @@ export default function StepDeployment({
                                 fontSize: 12,
                             }}
                             value={
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? sourceParamsText
                                     : sinkParamsText
                             }
                             onChange={(e) =>
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? setSourceParamsText(e.target.value)
                                     : setSinkParamsText(e.target.value)
                             }
                         />
 
                         <label className="context-label">
-                            {deploymentStrategy === "MODIFY_SOURCE"
+                            {isSourceReplacement
                                 ? "Source Connection Name"
                                 : "Sink Connection Name"}
                         </label>
                         <input
                             className="orch-input"
                             value={
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? sourceConnectionName
                                     : sinkConnectionName
                             }
                             onChange={(e) =>
-                                deploymentStrategy === "MODIFY_SOURCE"
+                                isSourceReplacement
                                     ? setSourceConnectionName(e.target.value)
                                     : setSinkConnectionName(e.target.value)
                             }
@@ -832,13 +866,13 @@ export default function StepDeployment({
                                     Pipeline
                                 </>
                             )}
-                            {deploymentStrategy === "MODIFY_SOURCE" && (
+                            {isSourceReplacement && (
                                 <>
                                     <FiEdit2 style={{ marginRight: 8 }} />{" "}
-                                    Modify Source
+                                    {sourceActionLabel}
                                 </>
                             )}
-                            {deploymentStrategy === "MODIFY_SINK" && (
+                            {isSinkModification && (
                                 <>
                                     <FiEdit2 style={{ marginRight: 8 }} />{" "}
                                     Modify Sink
